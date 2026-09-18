@@ -63,6 +63,10 @@ TestCase {
     compact = descendants(surface, function(item) { return item.accessibleLabel === "Browse view: Compact" })[0]
     settings = descendants(surface, function(item) { return item.accessibleLabel === "Settings" })[0]
     verify(compact && settings)
+    // The native Ui.Button explicitly enables MouseArea hover. Our C.Button
+    // stub inherits a platform default, which is false in bare offscreen CI.
+    // Match the native input contract before exercising real pointer events.
+    compact.hoverEnabled = true
     surface.Window.window.requestActivate()
     tryCompare(surface.Window.window, "active", true)
     leave()

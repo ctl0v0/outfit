@@ -128,7 +128,12 @@ class HardeningTests(unittest.TestCase):
             pid = int(pidfile.read_text())
             for _ in range(20):
                 path = Path(f"/proc/{pid}/stat")
-                if not path.exists() or path.read_text().split(") ", 1)[1].startswith("Z"):
+                try:
+                    state = path.read_text().split(") ", 1)[1]
+                except FileNotFoundError:
+                    # Successful reaping may race the observation itself.
+                    break
+                if state.startswith("Z"):
                     break
                 time.sleep(0.05)
             else:
