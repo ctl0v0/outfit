@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -100,6 +101,82 @@ class ReadmeIndexTests(unittest.TestCase):
         with app.ReadmeIndex(self.store) as reopened:
             self.assertEqual(len(reopened.matches("orbitalwidgets")), 2)
             self.assertEqual(reopened.matches("wi"), {})  # README substrings are not words.
+
+    def test_readonly_reopens_and_noop_ownership_changes_keep_index_caches_warm(self):
+        for active_writer in (False, True):
+            with self.subTest(active_writer=active_writer), app.ReadmeIndex(self.store, create=True) as writer:
+                writer.put(app.readme_key(self.items[0]), self.document(), 100)
+                if not active_writer:
+                    writer.close()
+                # The first reader may create the WAL. Warm after it exists.
+                app.readme_index_snapshot(self.store)
+                states = app.readme_index_snapshot(self.store)
+                matches = app.indexed_search_matches(self.store, "orbitalwidgets")
+                stamp = app.readme_index_stamp(self.store)
+                wal = self.store.base / "readme-search.sqlite-wal"
+                before = wal.stat()
+                self.assertEqual(before.st_size > 0, active_writer)
+                # Like root-only SQLite fchown, chmod to the existing mode
+                # changes ctime without changing bytes or access permissions.
+                wal.chmod(before.st_mode & 0o777)
+                self.assertNotEqual(wal.stat().st_ctime_ns, before.st_ctime_ns)
+                with app.ReadmeIndex(self.store) as reader:
+                    self.assertEqual(reader.states(), states[0])
+                self.assertEqual(app.readme_index_stamp(self.store), stamp)
+                with mock.patch.object(app, "ReadmeIndex", side_effect=AssertionError("Warm cache reopened SQLite")), \
+                        mock.patch.object(app.os, "open", side_effect=AssertionError("Warm cache reread WAL")):
+                    self.assertEqual(app.readme_index_snapshot(self.store), states)
+                    self.assertEqual(app.indexed_search_matches(self.store, "orbitalwidgets"), matches)
+
+    def test_sidecar_content_restored_mtime_identity_and_permissions_invalidate(self):
+        for suffix in ("-wal", "-journal"):
+            with self.subTest(suffix=suffix):
+                path = self.store.base / ("readme-search.sqlite" + suffix)
+                path.write_bytes(b"first contents")
+                before = path.stat()
+                stamp = app.readme_index_stamp(self.store)
+                path.write_bytes(b"other contents")
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                self.assertEqual(path.stat().st_size, before.st_size)
+                changed = app.readme_index_stamp(self.store)
+                self.assertNotEqual(changed, stamp)
+                replacement = self.store.base / "replacement"
+                replacement.write_bytes(path.read_bytes())
+                os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                replacement.replace(path)
+                replaced = app.readme_index_stamp(self.store)
+                self.assertNotEqual(replaced, changed)
+                path.chmod(0o400)
+                self.assertNotEqual(app.readme_index_stamp(self.store), replaced)
+
+    def test_unsafe_sidecars_are_not_hashed_or_hidden_by_warm_stamps(self):
+        for suffix in ("-wal", "-journal"):
+            with self.subTest(suffix=suffix):
+                path = self.store.base / ("readme-search.sqlite" + suffix)
+                path.write_bytes(b"fixture")
+                stamp = app.readme_index_stamp(self.store)
+                with mock.patch.object(app.os, "getuid", return_value=os.getuid() + 1), \
+                        mock.patch.object(app.os, "open", side_effect=AssertionError("Unsafe file opened")):
+                    self.assertNotEqual(app.readme_index_stamp(self.store), stamp)
+                    with self.assertRaises(ValueError):
+                        app.ReadmeIndex(self.store)
+                path.unlink()
+                path.symlink_to(self.store.base / "catalog.json")
+                with mock.patch.object(app.os, "open", side_effect=AssertionError("Symlink opened")):
+                    self.assertNotEqual(app.readme_index_stamp(self.store), stamp)
+                    with self.assertRaises(ValueError):
+                        app.ReadmeIndex(self.store)
+                path.unlink()
+
+    def test_sidecar_open_race_does_not_poison_verified_stamp(self):
+        name = "readme-search.sqlite-wal"
+        path = self.store.base / name
+        path.write_bytes(b"fixture")
+        verified = app.readme_index_stamp(self.store)
+        path.chmod(path.stat().st_mode & 0o777)
+        with mock.patch.object(app.os, "open", side_effect=FileNotFoundError("Concurrent checkpoint")):
+            self.assertNotEqual(app.readme_index_stamp(self.store), verified)
+        self.assertEqual(app.readme_index_stamp(self.store), verified)
 
     def test_readonly_empty_index_and_corruption_do_not_break_listing_search(self):
         app.readme_index_data(self.store, self.items, "dock")

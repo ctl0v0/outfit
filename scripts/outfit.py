@@ -3114,14 +3114,55 @@ class ReadmeIndex:
                 for key, value in self.evidence(query).items()}
 
 
+def _readme_sidecar_stamp(store: Store, suffix: str) -> tuple[Any, ...] | None:
+    name = "readme-search.sqlite" + suffix
+    stamp = store.stamp(name)
+    if (stamp is None or not stat.S_ISREG(stamp[4]) or stamp[5] != os.getuid()
+            or stamp[3] > MAX_SEARCH_INDEX_BYTES + 4 * 1024 * 1024):
+        return stamp
+    cache = store.memory.setdefault("indexSidecarStamps", {})
+    cached = cache.get(suffix)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    # SQLite's Unix VFS fchowns WAL/journal files on open when running as
+    # root, even for read-only connections and unchanged ownership. Preserve
+    # identity, permissions, owner, size and mtime, but verify bytes on ctime
+    # changes instead of treating that no-op as a new corpus. This also detects
+    # same-size content edits whose mtime was restored. Hash only on stat misses.
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=store.fd)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            opened = (info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_mode, info.st_uid)
+            if opened != stamp:
+                return stamp
+            digest = hashlib.sha256()
+            remaining = stamp[3]
+            while remaining:
+                chunk = stream.read(min(remaining, 65536))
+                if not chunk:
+                    return stamp
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if stream.read(1) or store.stamp(name) != stamp:
+                return stamp
+    except OSError:
+        # A checkpoint may remove the WAL between stat and open. Keep the
+        # conservative raw stamp on races/errors; never memoize an unread file.
+        return stamp
+    verified = stamp[:2] + (digest.digest(),) + stamp[3:]
+    cache[suffix] = (stamp, verified)
+    return verified
+
+
 def readme_index_stamp(store: Store) -> tuple[Any, ...]:
     # SHM is reader/writer coordination, not content: even read-only connections
     # update its lock metadata. Still invalidate if it becomes unsafe to open.
     shm = store.stamp("readme-search.sqlite-shm")
     unsafe_shm = shm if shm and (not stat.S_ISREG(shm[4]) or shm[5] != os.getuid()
                                 or shm[3] > MAX_SEARCH_INDEX_BYTES + 4 * 1024 * 1024) else None
-    return (SEARCH_INDEX_VERSION, unsafe_shm) + tuple(store.stamp("readme-search.sqlite" + suffix)
-                                                     for suffix in ("", "-wal", "-journal"))
+    return (SEARCH_INDEX_VERSION, unsafe_shm, store.stamp("readme-search.sqlite"),
+            _readme_sidecar_stamp(store, "-wal"), _readme_sidecar_stamp(store, "-journal"))
 
 
 def readme_index_snapshot(store: Store) -> tuple[dict[str, tuple], float]:
