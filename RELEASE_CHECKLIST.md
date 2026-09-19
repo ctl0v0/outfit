@@ -73,7 +73,7 @@ collected in a disposable stable Omarchy VM, with no personal accounts configure
    Git revision, including update and removal. A local fixture is not evidence of
    installing the published source. Record SHA, OS/Qt/Python versions and results.
 
-## Fictional UI and marketplace capture
+## Fictional UI regression captures
 
 Install the writable checkout in the guest. Run:
 
@@ -101,9 +101,22 @@ checks fixture identity via IPC and the shell environment, and restores the
 normal shell/workspace/cursor. After interruption use `--restore`; ambiguous
 recovery state is retained for inspection. Never capture personal notifications.
 
-Review the generated image and copy the approved capture to root `preview.png`.
-The capture must come from the real hosted UI with fictional data; a mockup is not
-evidence of host integration. Record captured scenarios in release evidence.
+Review the generated images as regression evidence. Keep these fictional fixture
+captures separate from the public README screenshots. A mockup is not evidence
+of host integration. Record captured scenarios in release evidence.
+
+## Public screenshots with real data
+
+Root `preview.png` and `docs/screenshots/*.png` show the running production UI
+with real marketplace data, not the fixture harness. See
+[capture notes](docs/screenshots/README.md) for the current images.
+
+Before replacing them, confirm service status reports `demo: false`, wait for
+queries and preview images to settle, and capture only the Outfit window. Review
+each image for private information and visual defects, strip image metadata,
+and restore the prior view, workspace, and cursor. Update captions and capture
+notes together with the images; marketplace counts and installed state are
+snapshots, not permanent product claims.
 
 ## Interaction matrix
 

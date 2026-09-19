@@ -8,9 +8,10 @@ Outfit brings the Omarchy plugin catalog and your installed plugins into one
 place. Browse ideas for your desktop, see why a plugin might suit your setup,
 read its documentation, and choose what to install.
 
-![Outfit browsing plugins on an Omarchy desktop](preview.png)
+![Outfit browsing real Omarchy plugins, sorted by most liked](preview.png)
 
-*Preview uses fictional plugin data.*
+*Captured from the running app with real marketplace data. Listings, counts, and
+installed status reflect the capture session.*
 
 ## What you can do
 
@@ -27,6 +28,25 @@ read its documentation, and choose what to install.
 
 Hardware-informed suggestions are starting points, not compatibility guarantees.
 Each plugin's detail page explains the match and links to its source and setup notes.
+
+<details>
+<summary>More screenshots: search and plugin details</summary>
+
+### Search the catalog
+
+Searching for **calendar**, sorted by **Best match**:
+
+![Live calendar search results in Outfit](docs/screenshots/search.png)
+
+### Inspect a plugin
+
+Radio Atlas with its marketplace preview, popularity metrics, and installed-plugin controls:
+
+![Radio Atlas detail page in Outfit](docs/screenshots/plugin-details.png)
+
+These are real app captures, taken on September 19, 2026 (UTC).
+
+</details>
 
 ## Install
 
