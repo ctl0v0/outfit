@@ -205,10 +205,20 @@ class BuildTests(unittest.TestCase):
                                previous_public=False, max_documents=None, min_coverage=0.1, workers=1)
         for key, value in overrides.items():
             setattr(args, key, value)
+        def git_metadata(argv, **_kwargs):
+            # Fixture artifacts have deterministic provenance; do not depend on
+            # the runner's checkout owner or process-wide Git safe-directory state.
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return COMMIT + "\n"
+            if argv == ["git", "status", "--porcelain", "--", "scripts/build_search_pack.py",
+                        "scripts/outfit.py", ".github/workflows/search-pack.yml", "data/bootstrap-catalog.json"]:
+                return b""
+            raise AssertionError("Unexpected builder subprocess: " + repr(argv))
         with patch.object(pack, "collect_record", return_value=pack.collect_record(FixtureClient(), ITEM),
                           side_effect=collect_side_effect), \
              patch.object(pack.PublicClient, "preflight"), \
              patch.object(pack, "utc_now", return_value=datetime(2026, 9, 18, 1, 2, 3, tzinfo=timezone.utc)), \
+             patch.object(pack.subprocess, "check_output", side_effect=git_metadata), \
              patch("builtins.print"):
             pack.build(args)
         return Path(args.output)
@@ -220,6 +230,8 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(manifest["version"], "20260918T010203Z")
             self.assertTrue(manifest["complete"])
             self.assertTrue(manifest["publishable"])
+            self.assertEqual(manifest["provenance"]["sourceCommit"], COMMIT)
+            self.assertFalse(manifest["provenance"]["sourceDirty"])
             self.assertEqual(manifest["docCount"], len(rows))
             self.assertEqual(manifest["provenance"]["catalogSnapshotSha256"], pack.digest((output / "catalog.json").read_bytes()))
             asset = output / "search-pack-20260918T010203Z.jsonl.gz"
