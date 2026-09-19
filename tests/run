@@ -28,6 +28,7 @@ if [[ "$mode" != --python-only ]]; then
   "$qmlformat" "$root/ui/OutfitIcon.qml" >/dev/null
   "$qmlformat" "$root/ui/DiagnosticsPane.qml" >/dev/null
   "$qmlformat" "$root/ui/ReadmeIndexStatus.qml" >/dev/null
+  "$qmlformat" "$root/ui/BackgroundActivity.qml" >/dev/null
   "$qmlformat" "$root/ui/InterestsManager.qml" >/dev/null
   "$qmlformat" "$root/ui/PluginDetailPage.qml" >/dev/null
   "$qmlformat" "$root/demo/DetailPrototype.qml" >/dev/null

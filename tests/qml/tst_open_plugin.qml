@@ -37,12 +37,12 @@ TestCase {
     var result = {ok:state === "accepted",action:"open-plugin",generation:owner.generation,
       pluginId:owner.pluginId,openState:state,error:state === "accepted" ? "" : "Fixture Open " + state}
     for (var key in (extra || {})) result[key] = extra[key]
-    var collector = findChild(worker, "backgroundCollector")
-    collector.text = JSON.stringify(result)
-    collector.streamFinished()
+    worker.receiveLine(JSON.stringify(result))
     var process = findChild(worker, "backgroundWorker")
     process.running = false
     process.exited(exitCode === undefined ? (state === "accepted" ? 0 : 2) : exitCode, 0)
+    // A rejected JSONL envelope is ignored until the exit/drain deadline.
+    if (worker.active) findChild(worker, "backgroundDrain").triggered()
     return owner
   }
   function test_open_is_a_separate_fixed_worker_lane_with_no_focus_or_mutation_effects() {
@@ -212,8 +212,8 @@ TestCase {
     object.setPluginOperation(listing.id, {pending:false,status:"failed",error:"Keep recovery"})
     verify(!object.openPlugin(listing))
     compare(object.pluginError(listing.id), "Keep recovery")
-    object.inventory = [entry("io.github.ctl0v0.omafit")]
-    verify(!object.openPlugin({id:"io.github.ctl0v0.omafit"}))
+    object.inventory = [entry("io.github.ctl0v0.outfit")]
+    verify(!object.openPlugin({id:"io.github.ctl0v0.outfit"}))
     compare(jobs(object).generation, 0)
     compare(object.shell.summons, 0)
   }

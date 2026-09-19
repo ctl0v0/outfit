@@ -14,7 +14,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-ID = "io.github.ctl0v0.omafit"
+ID = "io.github.ctl0v0.outfit"
 VIEWS = ["comfortable", "compact", "dense", "list"]
 DETAIL_STATES = ["available", "installed", "disabled", "service", "pending", "failed", "manual", "replacement", "long", "missing"]
 parser = argparse.ArgumentParser()

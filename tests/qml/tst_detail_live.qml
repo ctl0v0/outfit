@@ -207,10 +207,8 @@ TestCase {
     var back = child(view, "detailBack")
     back.forceActiveFocus()
     var owner = jobs.activeRequest
-    var collector = child(jobs, "backgroundCollector")
-    collector.text = JSON.stringify({ok:true,action:"open-plugin",generation:owner.generation,
-      pluginId:owner.pluginId,openState:"accepted",error:""})
-    collector.streamFinished()
+    jobs.receiveLine(JSON.stringify({ok:true,action:"open-plugin",generation:owner.generation,
+      pluginId:owner.pluginId,openState:"accepted",error:""}))
     var process = child(jobs, "backgroundWorker")
     process.running = false
     process.exited(0, 0)
@@ -300,7 +298,7 @@ TestCase {
     view.close()
   }
   function test_protected_uninstall_hidden_and_revalidated_at_confirmation_data() {
-    return [{tag:"builtin", id:"example.live", firstParty:true}, {tag:"self", id:"io.github.ctl0v0.omafit", firstParty:false}]
+    return [{tag:"builtin", id:"example.live", firstParty:true}, {tag:"self", id:"io.github.ctl0v0.outfit", firstParty:false}]
   }
   function test_protected_uninstall_hidden_and_revalidated_at_confirmation(data) {
     var row = listing({id:data.id})

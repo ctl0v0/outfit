@@ -10,8 +10,10 @@ import concurrent.futures
 import errno
 import fcntl
 import functools
+import gzip
 import hashlib
 import html
+import io
 import json
 import math
 import os
@@ -30,12 +32,24 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from typing import Any, Iterable
 
 
-APP_ID = "io.github.ctl0v0.omafit"
+APP_ID = "io.github.ctl0v0.outfit"
+LEGACY_APP_ID = "io.github.ctl0v0.omafit"  # Protected until explicit identity migration.
 SERVICE_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "data" / "services.json"
 DISCOVERY_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "data" / "discovery.json"
+BOOTSTRAP_CATALOG_PATH = Path(__file__).resolve().parents[1] / "data" / "bootstrap-catalog.json"
+SEARCH_PACK_URL = "https://github.com/ctl0v0/outfit/releases/download/search-pack/latest.json"
+MAX_PACK_BYTES = 64 * 1024 * 1024
+MAX_PACK_EXPANDED = 256 * 1024 * 1024
+MAX_PACK_RECORD_BYTES = 1024 * 1024
+MAX_PACK_LEGAL_BYTES = 128 * 1024
+MAX_PACK_COMBINED_LEGAL_BYTES = 512 * 1024
+SEARCH_PACK_INTERVAL = 86400
+SEARCH_PACK_INTERRUPTED_RETRIES = 3
+SEARCH_PACK_INTERRUPTION_WINDOW = 60
 CATALOG_URL = "https://plugins.omarchy.org/catalog.json"
 ENGAGEMENT_URL = "https://api.omarchyplugins.com/v1/stats"
 MAX_ENGAGEMENT_BYTES = 2 * 1024 * 1024
@@ -593,7 +607,7 @@ class RestrictedRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
-def read_bounded_response(response: Any, maximum: int, deadline: float) -> bytes:
+def read_bounded_response(response: Any, maximum: int, deadline: float, progress: Any = None) -> bytes:
     announced = response.headers.get("Content-Length")
     try:
         announced_size = int(announced) if announced else 0
@@ -622,6 +636,8 @@ def read_bounded_response(response: Any, maximum: int, deadline: float) -> bytes
         output.extend(chunk)
         if len(output) > maximum:
             raise ValueError("Remote content exceeds its size limit.")
+        if chunk and progress is not None:
+            progress(bytesReceived=len(output), **({"bytesTotal": announced_size} if announced_size > 0 else {}))
         if not chunk:
             return bytes(output)
 
@@ -649,7 +665,7 @@ class RestrictedMediaRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
-def fetch_bytes(url: str, host: str, maximum: int, timeout: float = 12) -> bytes:
+def fetch_bytes(url: str, host: str, maximum: int, timeout: float = 12, progress: Any = None) -> bytes:
     parsed = urllib.parse.urlsplit(url)
     if (
         parsed.scheme != "https"
@@ -666,7 +682,7 @@ def fetch_bytes(url: str, host: str, maximum: int, timeout: float = 12) -> bytes
     opener = urllib.request.build_opener(RestrictedRedirect(host))
     deadline = time.monotonic() + timeout
     with opener.open(request, timeout=timeout) as response:
-        return read_bounded_response(response, maximum, deadline)
+        return read_bounded_response(response, maximum, deadline, progress)
 
 
 def marketplace_image_url(value: Any) -> str:
@@ -776,9 +792,10 @@ def normalize_catalog(data: Any) -> tuple[list[dict[str, Any]], str]:
     return rows, one_line(data.get("generatedAt"), 64)
 
 
-def fetch_catalog() -> tuple[list[dict[str, Any]], str]:
+def fetch_catalog(progress: Any = None) -> tuple[list[dict[str, Any]], str]:
     return normalize_catalog(safe_json_loads(
-        fetch_bytes(CATALOG_URL, "plugins.omarchy.org", MAX_CATALOG_BYTES, 20),
+        fetch_bytes(CATALOG_URL, "plugins.omarchy.org", MAX_CATALOG_BYTES, 20,
+                    **({"progress": progress} if progress is not None else {})),
         "Marketplace",
     ))
 
@@ -2137,7 +2154,7 @@ def open_plugin(request: dict[str, Any], generation: int) -> dict[str, Any]:
         return {"ok": state == "accepted", "action": "open-plugin", "generation": generation,
                 "pluginId": identity, "openState": state, "error": error}
 
-    if identity == APP_ID:
+    if identity in {APP_ID, LEGACY_APP_ID}:
         return result("unavailable", "Outfit cannot open itself from plugin details.")
     try:
         # Do not use the display normalizer or filesystem fallback: either can
@@ -2675,12 +2692,20 @@ class ScanResult(tuple):
         return result
 
 
-def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+def scan_profile(progress: Any = None) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
     signals: list[dict[str, Any]] = []
     seen: set[str] = set()
     unavailable: list[str] = []
     inventory: list[dict[str, Any]] = []
     partial: set[str] = set()
+    finished = 0
+
+    def completed() -> None:
+        nonlocal finished
+        finished += 1
+        if progress is not None:
+            progress("scan", "Local check finished", processed=finished, total=len(PROBE_IDS),
+                     checksFinished=finished, checksTotal=len(PROBE_IDS))
 
     def read(path: Path, maximum: int, probe: str) -> str:
         value = _read_small(path, maximum)
@@ -2714,6 +2739,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
                 ))
     except (OSError, TimeoutError, ValueError):
         unavailable.append("displays")
+    completed()
 
     try:
         devices = safe_json_loads(
@@ -2733,6 +2759,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
             add(_signal("pen-tablet", "Pen or tablet", {"stylus": 22, "active pen": 20, "wacom": 18, "tablet": 8}, "Input device"))
     except (OSError, TimeoutError, ValueError):
         unavailable.append("input devices")
+    completed()
 
     try:
         bluetooth = run_command(
@@ -2765,6 +2792,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
                 add(_known_bluetooth(name, info))
     except (OSError, TimeoutError, ValueError):
         unavailable.append("Bluetooth")
+    completed()
 
     usb_hub = False
     usb_support = False
@@ -2797,6 +2825,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
             add(_signal("elgato", "Elgato device", {"elgato": 26, "key light": 18, "stream deck": 18}, "Attached USB device"))
     except OSError:
         unavailable.append("USB devices")
+    completed()
 
     if "hardware-dock" not in seen and monitor_count > 1 and usb_hub and usb_support:
         add(_signal(
@@ -2818,6 +2847,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
         add(_signal("thinkpad", "ThinkPad", {"thinkpad": 26, "lenovo": 12, "laptop": 4}, "System model"))
     elif "dell" in system_text:
         add(_signal("dell", "Dell computer", {"dell": 22, "laptop": 4, "power": 3}, "System vendor"))
+    completed()
 
     try:
         if not Path("/sys/class/drm").is_dir() or not os.access("/sys/class/drm", os.R_OK | os.X_OK):
@@ -2840,6 +2870,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
                 add(_signal(identity, label, terms, "DRM device"))
     except OSError:
         unavailable.append("graphics")
+    completed()
 
     audio_text = read(Path("/proc/asound/cards"), 32 * 1024, "audio devices")
     try:
@@ -2860,6 +2891,7 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
     for needle, identity, label, terms in audio_mappings:
         if needle in normalized_audio:
             add(_signal(identity, label, terms, "Audio device"))
+    completed()
 
     try:
         battery_found = False
@@ -2876,18 +2908,22 @@ def scan_profile() -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]
             add(_signal("battery", "System battery", {"battery": 15, "charge limit": 12, "power management": 10}, "Power supply"))
     except OSError:
         unavailable.append("power")
+    completed()
 
     for identity, (path, label, terms) in CAPABILITIES.items():
         if os.path.isfile(path) and os.access(path, os.X_OK):
             if identity == "nvidia" and "graphics-nvidia" in seen:
                 continue
             add(_signal(f"capability-{identity}", label, terms, "Installed executable; device presence not confirmed", "software"))
+    completed()
 
     inventory, inventory_unavailable = scan_inventory()
     if inventory_unavailable:
         unavailable.append("installed plugins")
     elif any(item.get("barSectionKnown") is False for item in inventory):
         unavailable.append("bar sections")
+    completed()
+    completed()
 
     probes = [{"id": identity, "state": "failed" if identity in unavailable else
                "partial" if identity in partial else "success",
@@ -3039,11 +3075,27 @@ class ReadmeIndex:
             self.db.close()
             self.db = None
 
-    def states(self) -> dict[str, tuple]:
+    def document_rows(self, sql: str, parameters: tuple = (), keys: set[str] | None = None):
+        """Bounded current-key queries even when retained historical seeds grow.
+
+        SQL is application-owned and uses the document alias d. Batches stay
+        below SQLite's portable variable limit; no imported SQL is accepted.
+        """
         if self.db is None:
-            return {}
-        return {row[0]: row[1:] for row in self.db.execute(
-            "SELECT key,state,version,attempts,retry_at,length(body)>0,truncated FROM documents LIMIT 10000")}
+            return
+        if keys is None:
+            yield from self.db.execute(sql + " LIMIT 10000", parameters)
+            return
+        ordered = sorted(keys)
+        for offset in range(0, len(ordered), 256):
+            batch = ordered[offset:offset + 256]
+            yield from self.db.execute(sql + " AND d.key IN (" + ",".join("?" for _ in batch) + ")",
+                                       (*parameters, *batch))
+
+    def states(self, keys: set[str] | None = None) -> dict[str, tuple]:
+        return {row[0]: row[1:] for row in self.document_rows(
+            "SELECT d.key,d.state,d.version,d.attempts,d.retry_at,length(d.body)>0,d.truncated FROM documents d WHERE 1",
+            keys=keys)}
 
     def put(self, key: str, document: dict[str, Any], now: float) -> None:
         text = normalized(document.get("searchText") or document.get("content") or document.get("text"))
@@ -3070,11 +3122,12 @@ class ReadmeIndex:
                     state=excluded.state,attempts=excluded.attempts,retry_at=excluded.retry_at""",
                     (key, "unavailable" if unavailable else "failed", attempts, now + delay))
 
-    def sync(self, items: list[dict[str, Any]], cached: dict[str, Any], now: float) -> None:
+    def sync(self, items: list[dict[str, Any]], cached: dict[str, Any], now: float, prune: bool = True) -> None:
         keys = {readme_key(item) for item in items} - {""}
         states = self.states()
+        states.update(self.states(keys))
         with self.db:
-            for key in states.keys() - keys:
+            for key in (states.keys() - keys) if prune else ():
                 row = self.db.execute("SELECT rowid,body FROM documents WHERE key=?", (key,)).fetchone()
                 if row[1]:
                     self.db.execute("INSERT INTO readme_fts(readme_fts,rowid,body) VALUES('delete',?,?)", row)
@@ -3088,7 +3141,7 @@ class ReadmeIndex:
                 self.put(key, {**entry, "ok": True, "truncated": len(entry["content"]) >= MAX_README_TEXT, "path": "README.md"}, now)
                 states[key] = ("indexed", SEARCH_INDEX_VERSION, 1, 0, True, True)
 
-    def evidence(self, query: str) -> dict[str, dict[str, Any]]:
+    def evidence(self, query: str, keys: set[str] | None = None) -> dict[str, dict[str, Any]]:
         _phrase, words = _search_parts(query)
         if self.db is None or not words:
             return {}
@@ -3097,10 +3150,10 @@ class ReadmeIndex:
         # A short term anywhere requires the bounded scan, including mixed queries.
         if all(len(word) >= 3 for word in words):
             expression = " OR ".join('"' + word[:3].replace('"', '""') + '"' for word in dict.fromkeys(words))
-            rows = self.db.execute("""SELECT d.key,d.body FROM readme_fts f
-                JOIN documents d ON d.rowid=f.rowid WHERE readme_fts MATCH ? LIMIT 10000""", (expression,))
+            rows = self.document_rows("""SELECT d.key,d.body FROM readme_fts f
+                JOIN documents d ON d.rowid=f.rowid WHERE readme_fts MATCH ?""", (expression,), keys)
         else:
-            rows = self.db.execute("SELECT key,body FROM documents WHERE body<>'' LIMIT 10000")
+            rows = self.document_rows("SELECT d.key,d.body FROM documents d WHERE d.body<>''", keys=keys)
         result = {}
         for key, body in rows:
             evidence = _search_text_evidence(body, query)
@@ -3155,6 +3208,333 @@ def _readme_sidecar_stamp(store: Store, suffix: str) -> tuple[Any, ...] | None:
     return verified
 
 
+def pack_release_url(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > 1000:
+        return False
+    return bool(re.fullmatch(
+        r"https://github\.com/ctl0v0/outfit/releases/download/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value))
+
+
+class SearchPackRedirect(urllib.request.HTTPRedirectHandler):
+    """Release redirects only; signed asset query parameters are opaque data."""
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        parsed = urllib.parse.urlsplit(new_url)
+        origin = urllib.parse.urlsplit(request.full_url).hostname
+        if (len(new_url) > 16384 or parsed.scheme != "https" or parsed.port not in (None, 443)
+                or parsed.username or parsed.password or parsed.fragment
+                or origin not in {"github.com", "release-assets.githubusercontent.com"}
+                or not (pack_release_url(new_url) or (
+                    parsed.hostname == "release-assets.githubusercontent.com"
+                    and parsed.path.startswith("/github-production-release-asset/")))):
+            raise ValueError("Search pack redirected outside the approved release hosts.")
+        return super().redirect_request(request, response, code, message, headers, new_url)
+
+
+def fetch_search_pack(url: str, maximum: int, progress: Any = None) -> bytes:
+    if not pack_release_url(url):
+        raise ValueError("Search pack URL is outside the fixed project releases.")
+    request = urllib.request.Request(url, headers={"User-Agent": "Outfit/0.1", "Accept": "application/octet-stream"})
+    opener = urllib.request.build_opener(SearchPackRedirect())
+    deadline = time.monotonic() + 60
+    with opener.open(request, timeout=20) as response:
+        return read_bounded_response(response, maximum, deadline, progress)
+
+
+def validate_pack_manifest(raw: Any) -> dict[str, Any]:
+    if (not isinstance(raw, dict) or type(raw.get("schemaVersion")) is not int or raw["schemaVersion"] != 1
+            or type(raw.get("dataVersion")) is not int or raw["dataVersion"] != SEARCH_INDEX_VERSION
+            or not isinstance(raw.get("version"), str) or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", raw["version"])
+            or raw.get("format") != "jsonl-gzip"
+            or raw.get("assetUrl") != "https://github.com/ctl0v0/outfit/releases/download/"
+                + f"search-pack-{raw['version']}/search-pack-{raw['version']}.jsonl.gz"
+            or not isinstance(raw.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", raw["sha256"])):
+        raise ValueError("Search pack manifest is invalid or incompatible.")
+    for field, maximum in (("docCount", MAX_CATALOG_ROWS), ("compressedBytes", MAX_PACK_BYTES),
+                           ("uncompressedBytes", MAX_PACK_EXPANDED)):
+        if type(raw.get(field)) is not int or not 0 <= raw[field] <= maximum:
+            raise ValueError("Search pack manifest exceeds its limits.")
+    for field in ("generatedAt", "catalogGeneratedAt"):
+        if not listing_date(raw.get(field)) or "T" not in raw[field] or not raw[field].endswith("Z"):
+            raise ValueError("Search pack manifest requires ISO source timestamps.")
+    if datetime.fromisoformat(raw["generatedAt"].replace("Z", "+00:00")).strftime("%Y%m%dT%H%M%SZ") != raw["version"]:
+        raise ValueError("Search pack version does not match its build timestamp.")
+    for field in ("complete", "publishable"):
+        if field in raw and type(raw[field]) is not bool:
+            raise ValueError("Search pack completion flags are invalid.")
+    for field in ("catalogCount", "candidateCount", "unpinnedCount"):
+        if field in raw and (type(raw[field]) is not int or not 0 <= raw[field] <= MAX_CATALOG_ROWS):
+            raise ValueError("Search pack catalog counters are invalid.")
+    if "candidateCount" in raw and (raw["docCount"] > raw["candidateCount"] or (
+            raw.get("complete") is True and raw["docCount"] != raw["candidateCount"])):
+        raise ValueError("Search pack completeness counters do not agree.")
+    for field in ("stateCounts", "reasonCounts"):
+        if field not in raw:
+            continue
+        counts = raw[field]
+        if (not isinstance(counts, dict) or len(counts) > 100
+                or any(not isinstance(key, str) or not key or len(key) > 128
+                       or type(value) is not int or not 0 <= value <= MAX_CATALOG_ROWS
+                       for key, value in counts.items()) or sum(counts.values()) != raw["docCount"]
+                or (field == "stateCounts" and set(counts) - {"indexed", "excluded", "unavailable"})):
+            raise ValueError("Search pack coverage counters are invalid.")
+    if "provenance" in raw:
+        provenance = raw["provenance"]
+        if (not isinstance(provenance, dict)
+                or provenance.get("sourceRepository") != "https://github.com/ctl0v0/outfit"
+                or not full_sha(provenance.get("sourceCommit"))
+                or provenance.get("catalogUrl") != CATALOG_URL
+                or type(provenance.get("licensePolicyVersion")) is not int or provenance["licensePolicyVersion"] != 1
+                or type(provenance.get("sourceDirty")) is not bool
+                or not listing_date(provenance.get("catalogFetchedAt"))
+                or any(not isinstance(provenance.get(field), str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", provenance[field]) for field in (
+                           "builderSha256", "normalizerSha256", "catalogSha256", "catalogSnapshotSha256", "policyFingerprint"))):
+            raise ValueError("Search pack source provenance is invalid.")
+    return {key: raw[key] for key in ("schemaVersion", "version", "dataVersion", "format", "assetUrl", "sha256",
+                                     "docCount", "compressedBytes", "uncompressedBytes", "generatedAt", "catalogGeneratedAt",
+                                     "complete", "publishable", "catalogCount", "candidateCount", "unpinnedCount",
+                                     "stateCounts", "reasonCounts", "provenance") if key in raw}
+
+
+# Only explicit redistribution grants enter the public seed. Uncertain licenses
+# remain excluded; the normal local-only upstream fetcher can still fill them.
+PACK_LICENSES = {"MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC"}
+
+
+def validate_pack_legal(record: dict[str, Any], repo: tuple[str, str, str], commit: str) -> None:
+    """Validate preserved attribution as bounded data, never fetched/executed."""
+    legal = record.get("sourceLicenseText")
+    path = record.get("sourceLicensePath")
+    notices = record.get("sourceNotices")
+    if (record["license"] not in PACK_LICENSES or not record["body"]
+            or record["path"] not in {"README.md", "readme.md", "README.MD", "README.rst", "README"}
+            or not re.fullmatch(r"[0-9a-f]{64}", record["sourceSha256"])
+            or not isinstance(legal, str) or not legal.strip()
+            or not isinstance(path, str) or not re.fullmatch(r"(?i)(?:licen[sc]e|copying)(?:[._-][a-z0-9.-]+)?", path)
+            or not isinstance(record.get("sourceLicenseSha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", record["sourceLicenseSha256"])
+            or not isinstance(notices, list) or len(notices) > 1000
+            or record.get("licenseEvidenceUrl") != f"https://api.github.com/repos/{repo[0]}/{repo[1]}/license?ref={commit}"
+            or not isinstance(record.get("modifications"), str) or not record["modifications"]
+            or len(record["modifications"]) > 1000):
+        raise ValueError("Search pack document lacks redistribution provenance.")
+    combined = len(legal.encode("utf-8"))
+    if combined > MAX_PACK_LEGAL_BYTES:
+        raise ValueError("Search pack license exceeds its limit.")
+    paths = set()
+    for notice in notices:
+        if (not isinstance(notice, dict) or not isinstance(notice.get("text"), str)
+                or not isinstance(notice.get("path"), str)
+                or not re.fullmatch(r"(?i)(?:notice|authors|copyright)(?:[._-][a-z0-9.-]+)?", notice["path"])
+                or notice["path"] in paths or not isinstance(notice.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", notice["sha256"])):
+            raise ValueError("Search pack contains an invalid preserved notice.")
+        paths.add(notice["path"])
+        size = len(notice["text"].encode("utf-8"))
+        if size > MAX_PACK_LEGAL_BYTES:
+            raise ValueError("Search pack notice exceeds its limit.")
+        combined += size
+    if combined > MAX_PACK_COMBINED_LEGAL_BYTES:
+        raise ValueError("Search pack combined attribution exceeds its limit.")
+
+
+def pack_records(packed: bytes, manifest: dict[str, Any]):
+    manifest = validate_pack_manifest(manifest)
+    if (len(packed) != manifest["compressedBytes"] or len(packed) > MAX_PACK_BYTES
+            or hashlib.sha256(packed).hexdigest() != manifest["sha256"]):
+        raise ValueError("Search pack checksum or compressed size does not match.")
+    expanded = count = 0
+    seen = set()
+    states, reasons = {}, {}
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(packed), mode="rb") as stream:
+            while True:
+                line = stream.readline(min(MAX_PACK_RECORD_BYTES, MAX_PACK_EXPANDED - expanded) + 1)
+                if not line:
+                    break
+                expanded += len(line)
+                count += 1
+                if (expanded > MAX_PACK_EXPANDED or expanded > manifest["uncompressedBytes"]
+                        or len(line) > MAX_PACK_RECORD_BYTES or count > MAX_CATALOG_ROWS
+                        or count > manifest["docCount"] or not line.endswith(b"\n")):
+                    raise ValueError("Search pack expanded data exceeds its limits.")
+                record = safe_json_loads(line, "Search pack record")
+                if (not isinstance(record, dict) or not isinstance(record.get("state"), str)
+                        or record["state"] not in {"indexed", "unavailable", "excluded"}
+                        or not isinstance(record.get("body"), str) or len(record["body"]) > MAX_README_TEXT
+                        or normalized(record["body"]) != record["body"]
+                        or type(record.get("truncated")) is not bool
+                        or not isinstance(record.get("license"), str) or len(record["license"]) > 100
+                        or not isinstance(record.get("sourceSha256"), str)
+                        or not isinstance(record.get("reason"), str) or not record["reason"] or len(record["reason"]) > 128
+                        or not isinstance(record.get("path"), str) or len(record["path"]) > 256
+                        or "\\" in record["path"] or record["path"].startswith("/")
+                        or ".." in record["path"].split("/")):
+                    raise ValueError("Search pack contains a malformed record.")
+                states[record["state"]] = states.get(record["state"], 0) + 1
+                reasons[record["reason"]] = reasons.get(record["reason"], 0) + 1
+                repo = github_repo(record.get("repo"))
+                commit = full_sha(record.get("commit"))
+                key = record.get("key")
+                compatible = (type(record.get("version")) is int and record["version"] == SEARCH_INDEX_VERSION
+                              and repo is not None and repo[2] == record.get("repo")
+                              and commit == record.get("commit") and bool(commit)
+                              and key == readme_key({"repo": repo[2], "listingCommit": commit}))
+                if not compatible:
+                    yield None
+                    continue
+                if key in seen:
+                    raise ValueError("Search pack contains duplicate document keys.")
+                seen.add(key)
+                if record["state"] != "indexed":
+                    if record["body"] or record["sourceSha256"]:
+                        raise ValueError("Excluded or unavailable search records must contain no README text.")
+                else:
+                    validate_pack_legal(record, repo, commit)
+                yield record
+    except (OSError, EOFError, zlib.error, UnicodeError) as error:
+        raise ValueError("Search pack gzip data is invalid.") from error
+    if expanded != manifest["uncompressedBytes"] or count != manifest["docCount"]:
+        raise ValueError("Search pack expanded size or record count does not match.")
+    if any(field in manifest and manifest[field] != counts
+           for field, counts in (("stateCounts", states), ("reasonCounts", reasons))):
+        raise ValueError("Search pack coverage counters do not match its records.")
+
+
+def search_pack_state(store: Store, now: float | None = None) -> dict[str, Any]:
+    now = time.time() if now is None else now
+    result = {"state": "none", "generatedAt": "", "catalogGeneratedAt": "", "importedAt": 0,
+              "lastAttemptAt": 0, "nextCheckAt": 0, "failures": 0, "docCount": 0, "documentCount": 0,
+              "imported": 0, "skipped": 0, "interruptedAttempts": 0, "error": ""}
+    try:
+        with ReadmeIndex(store) as index:
+            if index.db is not None and index.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='search_pack_state'").fetchone():
+                row = index.db.execute("SELECT value FROM search_pack_state WHERE id=1").fetchone()
+                if row:
+                    result.update(safe_json_loads(row[0].encode(), "Search pack receipt"))
+    except (OSError, ValueError, sqlite3.Error):
+        result.update(state="unavailable", error="Search pack state unavailable.")
+    result["due"] = result["nextCheckAt"] <= now
+    return result
+
+
+def prepare_search(store: Store, now: float, progress: Any = None) -> dict[str, Any]:
+    emit = progress or (lambda *args, **kwargs: None)
+    lock = os.open(".readme-index.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                   0o600, dir_fd=store.fd)
+    try:
+        info = os.fstat(lock)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("README index lock is not a private regular file.")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {**search_pack_state(store, now), "busy": True}
+        state = search_pack_state(store, now)
+        # Only the exclusive lock proves that the previous preparer is gone.
+        # Read-only status calls must not convert a live attempt into a retry.
+        interrupted = state["state"] == "preparing" or (
+            # Recover the old cold-start marker written before preparing existed.
+            state["state"] == "none" and state["lastAttemptAt"] > 0
+            and not state["importedAt"] and not state["failures"] and not state["error"])
+        if not interrupted and not state["due"]:
+            return state
+        interruptions = (state["interruptedAttempts"] + 1
+                         if interrupted and 0 <= now - state["lastAttemptAt"] <= SEARCH_PACK_INTERRUPTION_WINDOW
+                         else 1 if interrupted else 0)
+        with ReadmeIndex(store, create=True) as index:
+            def receipt(value):
+                index.db.execute("INSERT OR REPLACE INTO search_pack_state VALUES(1,?)",
+                                 (json.dumps(value, separators=(",", ":")),))
+            with index.db:
+                index.db.execute("CREATE TABLE IF NOT EXISTS search_pack_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+                if interruptions > SEARCH_PACK_INTERRUPTED_RETRIES:
+                    # Bound repeated abrupt worker crashes without hiding them as
+                    # successful preparation or spinning through immediate retries.
+                    state.update(state="error", interruptedAttempts=interruptions, due=False,
+                                 nextCheckAt=now + 300,
+                                 error="Public search preparation was repeatedly interrupted; retry in five minutes. Local search is retained.")
+                else:
+                    state.update(state="preparing", lastAttemptAt=now, nextCheckAt=now + 300,
+                                 interruptedAttempts=interruptions, error="", due=False)
+                receipt(state)
+            if state["state"] == "error":
+                return state
+            try:
+                emit("manifest", "Checking public search pack")
+                manifest = validate_pack_manifest(safe_json_loads(
+                    fetch_search_pack(SEARCH_PACK_URL, 64 * 1024), "Search pack manifest"))
+                if state["generatedAt"] and listing_time(manifest["generatedAt"]) < listing_time(state["generatedAt"]):
+                    raise ValueError("Search pack is older than the installed seed.")
+                emit("download", "Downloading public search pack", bytesReceived=0,
+                     bytesTotal=manifest["compressedBytes"])
+                packed = fetch_search_pack(manifest["assetUrl"], MAX_PACK_BYTES,
+                                           lambda **counts: emit("download", "Downloading public search pack",
+                                                                 **{"bytesTotal": manifest["compressedBytes"], **counts}))
+                imported = skipped = processed = 0
+                emit("import", "Validating and staging search documents", processed=0,
+                     total=manifest["docCount"], committed=0)
+                # Serialize with catalog replacement, and re-read current keys only
+                # after downloading. Never sync/prune against a seed's old catalog.
+                with store.scoped_lock(), index.db:
+                    current = {readme_key(item) for item in load_catalog(store)[0]} - {""}
+                    states = index.states(current)
+                    index.db.execute("CREATE TABLE IF NOT EXISTS search_pack_sources (key TEXT PRIMARY KEY, attribution TEXT NOT NULL)")
+                    for record in pack_records(packed, manifest):
+                        processed += 1
+                        old = states.get(record["key"]) if record else None
+                        if (record is None or record["key"] not in current
+                                or (old and (old[1] > SEARCH_INDEX_VERSION
+                                             or (old[1] == SEARCH_INDEX_VERSION and old[4])))):
+                            skipped += 1
+                        else:
+                            key = record["key"]
+                            existing = index.db.execute("SELECT rowid,body FROM documents WHERE key=?", (key,)).fetchone()
+                            if existing and existing[1]:
+                                index.db.execute("INSERT INTO readme_fts(readme_fts,rowid,body) VALUES('delete',?,?)", existing)
+                            body = normalized(record["body"])[:MAX_README_TEXT]
+                            kind = record["state"] if body or record["state"] != "indexed" else "unavailable"
+                            index.db.execute("""INSERT INTO documents(key,body,state,version,truncated,path,retry_at)
+                                VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body,
+                                state=excluded.state,version=excluded.version,truncated=excluded.truncated,
+                                path=excluded.path,retry_at=excluded.retry_at""",
+                                (key, body, kind, SEARCH_INDEX_VERSION, int(record["truncated"]), record["path"],
+                                 now + 7 * 86400 if kind == "unavailable" else 0))
+                            if body:
+                                rowid = index.db.execute("SELECT rowid FROM documents WHERE key=?", (key,)).fetchone()[0]
+                                index.db.execute("INSERT INTO readme_fts(rowid,body) VALUES(?,?)", (rowid, body))
+                                index.db.execute("INSERT OR REPLACE INTO search_pack_sources VALUES(?,?)",
+                                                 (key, json.dumps({field: value for field, value in record.items() if field != "body"},
+                                                                  ensure_ascii=False, separators=(",", ":"))))
+                            else:
+                                index.db.execute("DELETE FROM search_pack_sources WHERE key=?", (key,))
+                            imported += 1
+                        if processed % 100 == 0:
+                            emit("import", "Validating and staging search documents", processed=processed,
+                                 total=manifest["docCount"], committed=0)
+                    state.update(manifest, state="ready", importedAt=now, nextCheckAt=now + SEARCH_PACK_INTERVAL,
+                                 documentCount=manifest["docCount"], imported=imported, skipped=skipped, failures=0,
+                                 interruptedAttempts=0, error="", due=False)
+                    receipt(state)
+                emit("commit", "Search pack imported", processed=processed, total=manifest["docCount"],
+                     committed=imported, skipped=skipped)
+            except Exception:
+                # The import transaction rolled back; the previous receipt remains
+                # truthful even if a malformed final line cancelled a large import.
+                # Ordinary unexpected failures also back off. Process cancellation
+                # (SystemExit/KeyboardInterrupt) leaves preparing for lock-proven resume.
+                state = search_pack_state(store, now)
+                failures = min(10, state.get("failures", 0) + 1)
+                state.update(state="error", failures=failures, error="Public search pack unavailable; local search is retained.",
+                             interruptedAttempts=0, nextCheckAt=now + min(86400, 300 * 2 ** (failures - 1)), due=False)
+                with index.db:
+                    receipt(state)
+        return search_pack_state(store, now)
+    finally:
+        os.close(lock)
+
+
 def readme_index_stamp(store: Store) -> tuple[Any, ...]:
     # SHM is reader/writer coordination, not content: even read-only connections
     # update its lock metadata. Still invalidate if it becomes unsafe to open.
@@ -3165,31 +3545,32 @@ def readme_index_stamp(store: Store) -> tuple[Any, ...]:
             _readme_sidecar_stamp(store, "-wal"), _readme_sidecar_stamp(store, "-journal"))
 
 
-def readme_index_snapshot(store: Store) -> tuple[dict[str, tuple], float]:
+def readme_index_snapshot(store: Store, keys: set[str] | None = None) -> tuple[dict[str, tuple], float]:
     stamp = readme_index_stamp(store)
+    selection = frozenset(keys) if keys is not None else None
     cached = store.memory.get("indexSnapshot")
-    if cached is not None and cached[0] == stamp:
+    if cached is not None and cached[0] == (stamp, selection):
         return cached[1], cached[2]
     with ReadmeIndex(store) as index:
-        states = index.states()
+        states = index.states(keys)
         retry = 0
         if index.db is not None:
             exists = index.db.execute("SELECT 1 FROM sqlite_master WHERE name='index_control'").fetchone()
             row = index.db.execute("SELECT value FROM index_control WHERE name='retry_after'").fetchone() if exists else None
             retry = row[0] if row else 0
     if readme_index_stamp(store) == stamp:
-        store.memory["indexSnapshot"] = (stamp, states, retry)
+        store.memory["indexSnapshot"] = ((stamp, selection), states, retry)
     return states, retry
 
 
-def indexed_search_matches(store: Store, query: str) -> dict[str, dict[str, Any]]:
+def indexed_search_matches(store: Store, query: str, keys: set[str] | None = None) -> dict[str, dict[str, Any]]:
     stamp = readme_index_stamp(store)
     cache = store.memory.setdefault("indexQueries", {})
-    key = (stamp, query)
+    key = (stamp, query, frozenset(keys) if keys is not None else None)
     if key in cache:
         return cache[key]
     with ReadmeIndex(store) as index:
-        result = index.evidence(query)
+        result = index.evidence(query, keys)
     if readme_index_stamp(store) == stamp:
         if len(cache) >= 4:
             cache.clear()
@@ -3200,11 +3581,27 @@ def indexed_search_matches(store: Store, query: str) -> dict[str, dict[str, Any]
 def readme_index_data(store: Store, items: list[dict[str, Any]], query: str = "", now: float | None = None) -> dict[str, Any]:
     summary = {"eligible": 0, "indexed": 0, "pending": 0, "unavailable": 0,
                "failed": 0, "truncated": 0, "due": 0, "retryAt": 0, "error": ""}
+    keys = {readme_key(item) for item in items} - {""}
+    documents = {"total": len(keys), "indexed": 0, "processed": 0, "pending": len(keys),
+                 "unavailable": 0, "failed": 0, "skipped": 0}
+    summary["documents"] = documents
     for item in items:
         item.pop("_indexSearch", None)
     try:
-        states, summary["retryAt"] = readme_index_snapshot(store)
-        matches = indexed_search_matches(store, query) if query else {}
+        states, summary["retryAt"] = readme_index_snapshot(store, keys)
+        for key in keys:
+            kind, version, _attempts, _retry, has_text, _truncated = states.get(key, ("pending", 0, 0, 0, False, False))
+            terminal = ("indexed" if has_text and version == SEARCH_INDEX_VERSION else
+                        kind if kind in {"unavailable", "failed"} else "")
+            # A seed exclusion is not a completed local check. It remains pending
+            # and due; skipped is an informational subset of pending documents.
+            if kind == "excluded" and not terminal:
+                documents["skipped"] += 1
+            if terminal:
+                documents[terminal] += 1
+                documents["processed"] += 1
+                documents["pending"] -= 1
+        matches = indexed_search_matches(store, query, keys) if query else {}
         now = time.time() if now is None else now
         for item in items:
             key = readme_key(item)
@@ -3287,16 +3684,16 @@ def attach_interest_evidence(store: Store, items: list[dict[str, Any]], criteria
             expansions = {term: tuple(other for other in terms if literal_pattern(other).match(term))
                           for term in terms}
             try:
-                states, _retry = readme_index_snapshot(store)
+                states, _retry = readme_index_snapshot(store, keys)
                 with ReadmeIndex(store) as index:
                     if index.db is not None:
                         if all(len(term) >= 3 for term in terms):
                             expression = " OR ".join('"' + trigram.replace('"', '""') + '"'
                                                      for trigram in sorted({term[:3] for term in terms}))
-                            rows = index.db.execute("""SELECT d.key,d.body,d.version FROM readme_fts f
-                                JOIN documents d ON d.rowid=f.rowid WHERE readme_fts MATCH ? LIMIT 10000""", (expression,))
+                            rows = index.document_rows("""SELECT d.key,d.body,d.version FROM readme_fts f
+                                JOIN documents d ON d.rowid=f.rowid WHERE readme_fts MATCH ?""", (expression,), keys)
                         else:
-                            rows = index.db.execute("SELECT key,body,version FROM documents WHERE body<>'' LIMIT 10000")
+                            rows = index.document_rows("SELECT d.key,d.body,d.version FROM documents d WHERE d.body<>''", keys=keys)
                         for key, body, version in rows:
                             if key not in keys or version != SEARCH_INDEX_VERSION:
                                 continue
@@ -3634,7 +4031,7 @@ def fetch_search_readme(item: dict[str, Any]) -> dict[str, Any]:
     return {"ok": False}
 
 
-def index_readmes(store: Store, items: list[dict[str, Any]], now: float) -> dict[str, Any]:
+def index_readmes(store: Store, items: list[dict[str, Any]], now: float, progress: Any = None) -> dict[str, Any]:
     lock = os.open(".readme-index.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=store.fd)
     try:
         info = os.fstat(lock)
@@ -3649,11 +4046,11 @@ def index_readmes(store: Store, items: list[dict[str, Any]], now: float) -> dict
                 cached = load_readmes(store)
             except ValueError:
                 cached = {}
-            index.sync(items, cached, now)
+            index.sync(items, cached, now, prune=store.memory.get("catalogSource") != "bundled")
             control = index.db.execute("SELECT value FROM index_control WHERE name='retry_after'").fetchone()
             if control and control[0] > now:
                 return readme_index_data(store, items, now=now)
-            states = index.states()
+            states = index.states({readme_key(item) for item in items} - {""})
             selected = {}
             for item in sorted(items, key=lambda value: states.get(readme_key(value), ("", 0, 0))[2]):
                 key = readme_key(item)
@@ -3666,6 +4063,7 @@ def index_readmes(store: Store, items: list[dict[str, Any]], now: float) -> dict
                     break
             failed = 0
             cooldown = 0
+            completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=README_WORKERS) as executor:
                 futures = {executor.submit(fetch_search_readme, item): key for key, item in selected.items()}
                 for future in concurrent.futures.as_completed(futures):
@@ -3675,6 +4073,12 @@ def index_readmes(store: Store, items: list[dict[str, Any]], now: float) -> dict
                         document = {"ok": False}
                     # Commit each finished document, so interruption retains progress.
                     index.put(futures[future], document, now)
+                    completed += 1
+                    if progress is not None:
+                        documents = readme_index_data(store, items, now=now)["documents"]
+                        progress("index", "README document checked", processed=documents["processed"],
+                                 total=documents["total"], indexed=documents["indexed"], committed=completed,
+                                 batchProcessed=completed, batchTotal=len(selected), documents=documents)
                     failed += int(not document.get("ok") and not document.get("unavailable"))
                     cooldown = max(cooldown, min(86400, max(0, int(document.get("cooldown", 0)))))
                     if cooldown:
@@ -4355,7 +4759,7 @@ def public_row(
         "canDisable": item.get("canDisable") is True,
         "removable": identity in installed
             and item.get("party", "third-party") == "third-party"
-            and identity != APP_ID,
+            and identity not in {APP_ID, LEGACY_APP_ID},
         "party": item.get("party", "third-party"),
         "firstParty": item.get("party") == "first-party",
         "localOnly": local_only,
@@ -5093,20 +5497,52 @@ def load_catalog(store: Store) -> tuple[list[dict[str, Any]], float, str]:
     cached = memory.get("catalog")
     if isinstance(cached, tuple) and len(cached) == 3 and stamp == memory.get("catalogStamp"):
         return cached
-    raw = store.read("catalog.json", MAX_CACHE_BYTES, {"schema": CATALOG_SCHEMA, "plugins": [], "fetchedAt": 0})
-    if not isinstance(raw, dict) or raw.get("schema") != CATALOG_SCHEMA or not isinstance(raw.get("plugins"), list):
-        raise ValueError("Outfit catalog cache is invalid; refresh it to rebuild.")
-    rows = _normalize_catalog_rows(raw["plugins"], cached=True) if raw["plugins"] else []
+    cache_error = None
+    try:
+        raw = store.read("catalog.json", MAX_CACHE_BYTES, {"schema": CATALOG_SCHEMA, "plugins": [], "fetchedAt": 0})
+        if not isinstance(raw, dict) or raw.get("schema") != CATALOG_SCHEMA or not isinstance(raw.get("plugins"), list):
+            raise ValueError("Outfit catalog cache is invalid; refresh it to rebuild.")
+        rows = _normalize_catalog_rows(raw["plugins"], cached=True) if raw["plugins"] else []
+    except (OSError, ValueError) as error:
+        cache_error = error
+        rows, raw = [], {}
+    source = "cache" if rows else "none"
+    if not rows:
+        # Packaged public data is read through Path only. Store would chmod a
+        # shared/read-only installation directory and is never appropriate here.
+        try:
+            with BOOTSTRAP_CATALOG_PATH.open("rb") as stream:
+                data = stream.read(MAX_CATALOG_BYTES + 1)
+            if len(data) > MAX_CATALOG_BYTES:
+                raise ValueError("Bundled catalog exceeds its limit.")
+            bundled = safe_json_loads(data, "Bundled catalog")
+            if (not isinstance(bundled, dict) or not listing_date(bundled.get("generatedAt"))
+                    or "T" not in bundled["generatedAt"]):
+                raise ValueError("Bundled catalog requires its public source timestamp.")
+            rows, generated = normalize_catalog(bundled)
+            raw = {"generatedAt": generated, "fetchedAt": 0}
+            source = "bundled"
+        except (OSError, ValueError):
+            rows = []
+            if cache_error is not None:
+                memory["catalogSource"] = "none"
+                raise ValueError("Outfit catalog cache is invalid; refresh it to rebuild.") from cache_error
     for row in rows:
         _normalized_item_fields(row, False)
         row.setdefault("_searchEvidenceCache", {})
     carry_catalog_memos(rows, cached)
     generated = one_line(raw.get("generatedAt"), 64)
     fetched = raw.get("fetchedAt", 0)
-    result = (rows, fetched if type(fetched) in (int, float) else 0, generated)
+    result = (rows, fetched if type(fetched) in (int, float) and math.isfinite(fetched) and fetched >= 0 else 0, generated)
     memory["catalog"] = result
     memory["catalogStamp"] = stamp
+    memory["catalogSource"] = source
     return result
+
+
+def catalog_source_metadata(store: Store, generated: str) -> dict[str, Any]:
+    return {"catalogSource": store.memory.get("catalogSource", "none"),
+            "catalogBuiltAt": generated, "sourceDate": generated}
 
 
 def save_catalog(store: Store, items: list[dict[str, Any]], generated: str, now: float) -> None:
@@ -5115,18 +5551,20 @@ def save_catalog(store: Store, items: list[dict[str, Any]], generated: str, now:
         {key: value for key, value in item.items() if not key.startswith("_")}
         for item in items
     ]
-    store.write(
-        "catalog.json",
-        {"schema": CATALOG_SCHEMA, "fetchedAt": now, "generatedAt": generated, "plugins": stored_items},
-        MAX_CACHE_BYTES,
-    )
-    for item in items:
-        _normalized_item_fields(item, False)
-        item.setdefault("_searchEvidenceCache", {})
-        item.setdefault("_recommendationCache", {})
-    carry_catalog_memos(items, previous)
-    getattr(store, "memory", {})["catalog"] = (items, now, generated)
-    store.memory["catalogStamp"] = store.stamp("catalog.json")
+    with store.scoped_lock():
+        store.write(
+            "catalog.json",
+            {"schema": CATALOG_SCHEMA, "fetchedAt": now, "generatedAt": generated, "plugins": stored_items},
+            MAX_CACHE_BYTES,
+        )
+        for item in items:
+            _normalized_item_fields(item, False)
+            item.setdefault("_searchEvidenceCache", {})
+            item.setdefault("_recommendationCache", {})
+        carry_catalog_memos(items, previous)
+        getattr(store, "memory", {})["catalog"] = (items, now, generated)
+        store.memory["catalogStamp"] = store.stamp("catalog.json")
+        store.memory["catalogSource"] = "cache" if items else "none"
 
 
 def preview_cache_summary(store: Store, clear: bool = False) -> dict[str, int]:
@@ -5184,6 +5622,7 @@ def diagnostics(store: Store, preferences_store: Store) -> dict[str, Any]:
 PLUGIN_MUTATIONS = {
     "install-plugin", "enable-plugin", "disable-plugin", "place-plugin", "remove-plugin",
 }
+PROGRESS_ACTIONS = PLUGIN_MUTATIONS | {"catalog-refresh", "prepare-search", "index-readmes", "analyze", "rescan", "refresh"}
 
 
 def mutation_observed(
@@ -5269,7 +5708,7 @@ def run(
         "disable-plugin", "place-plugin", "remove-plugin", "readme-plugin", "thumbnails", "enrich",
         "diagnostics", "clear-previews", "discover", "index-readmes", "save-density",
         "context", "save-interests", "preview-interest", "matches", "review-matches",
-        "host-lifecycle", "open-plugin",
+        "host-lifecycle", "open-plugin", "catalog-refresh", "prepare-search",
     }:
         raise ValueError("Outfit request has an unsupported action.")
     generation = request.get("generation")
@@ -5279,18 +5718,23 @@ def run(
     if action == "open-plugin":
         return open_plugin(request, generation)
     progress_count = 0
-    def phase(name: str) -> None:
+    if request.get("streamProgress") is not True:
+        progress = None
+    def emit(name: str, message: str, **counts: Any) -> None:
         nonlocal progress_count
-        if progress is not None and action in PLUGIN_MUTATIONS and progress_count < 12:
+        if progress is not None and action in PROGRESS_ACTIONS:
             progress_count += 1
+            progress({"ok": True, "event": "progress", "responseKind": "progress", "final": False,
+                      "generation": generation, "action": action, "phase": name,
+                      "message": message, "sequence": progress_count, **counts})
+    def phase(name: str) -> None:
+        if progress is not None and action in PLUGIN_MUTATIONS and progress_count < 12:
             labels = {"checking": "Checking installed plugins", "installing": "Installing plugin",
                       "inventory": "Waiting for Omarchy to discover the installed plugin",
                       "enabling": "Enabling plugin", "disabling": "Disabling plugin",
                       "placing": "Placing bar widget", "removing": "Removing plugin",
                       "verifying": "Verifying the resulting plugin state"}
-            progress({"ok": True, "event": "progress", "responseKind": "progress", "final": False,
-                      "generation": generation, "action": action, "pluginId": plugin_id(request.get("pluginId")),
-                      "phase": name, "message": labels[name], "sequence": progress_count})
+            emit(name, labels[name], pluginId=plugin_id(request.get("pluginId")))
     current_time = time.time() if now is None else now
     notice = ""
     error = ""
@@ -5369,7 +5813,7 @@ def run(
         target_id = plugin_id(request.get("pluginId"))
         if not target_id:
             raise ValueError("Plugin management requires a valid plugin ID.")
-        if target_id == APP_ID and action != "place-plugin":
+        if target_id in {APP_ID, LEGACY_APP_ID} and action != "place-plugin":
             raise ValueError("Outfit cannot change its own running state.")
         phase("checking")
         authoritative_inventory, inventory_unavailable = scan_inventory()
@@ -5483,24 +5927,53 @@ def run(
         error = error or str(cache_error)
 
     local_only = request.get("localOnly") is True
-    should_fetch = not local_only and (action == "refresh" or (action in {"analyze", "enrich"}
+    should_fetch = not local_only and (action in {"refresh", "catalog-refresh"} or (action in {"analyze", "enrich"}
                     and (not items or current_time - fetched_at > CATALOG_MAX_AGE)))
     if should_fetch:
         try:
-            items, generated_at = fetch_catalog()
+            emit("catalog", "Downloading marketplace catalog", bytesReceived=0)
+            fresh_items, fresh_generated = fetch_catalog(
+                **({"progress": lambda **counts: emit("catalog", "Downloading marketplace catalog", **counts)}
+                   if progress is not None else {}))
+            save_catalog(store, fresh_items, fresh_generated, current_time)
+            items, generated_at = fresh_items, fresh_generated
             fetched_at = current_time
-            save_catalog(store, items, generated_at, current_time)
+            emit("catalog", "Marketplace catalog saved", processed=len(items), total=len(items))
             notice = "Marketplace catalog refreshed."
             error = ""
         except (OSError, TimeoutError, urllib.error.URLError, ValueError):
             error = "Could not refresh the marketplace. " + ("Using the saved catalog." if items else "Check your connection and try again.")
+
+    if action == "catalog-refresh":
+        _likes, likes_at, likes_notice = update_engagement(store, "load" if local_only else "refresh", current_time)
+        return {"ok": True, "action": action, "generation": generation, "responseKind": "catalog",
+                "catalogCount": len(items), "categories": sorted({item["category"] for item in items if item["category"]}),
+                "fetchedAt": fetched_at, "generatedAt": generated_at, **catalog_source_metadata(store, generated_at),
+                "likesFetchedAt": likes_at, "readmeIndex": readme_index_data(store, items, now=current_time),
+                "searchPack": search_pack_state(store, current_time), "notice": " ".join(filter(None, (notice, likes_notice))),
+                "error": error}
+
+    if action == "prepare-search":
+        enabled = preferences["readmeEnrichment"] and preferences["readmeIndexing"]
+        pack = (prepare_search(store, current_time, emit) if enabled and not local_only and not error
+                else search_pack_state(store, current_time))
+        # Catalog may have advanced while the pack downloaded.
+        try:
+            items, fetched_at, generated_at = load_catalog(store)
+        except (OSError, ValueError):
+            error = error or "Catalog unavailable; local search is retained."
+        return {"ok": True, "action": action, "generation": generation, "responseKind": "search-prepared",
+                "searchPack": {**pack, "enabled": enabled},
+                "readmeIndex": readme_index_data(store, items, now=current_time),
+                "catalogCount": len(items), "fetchedAt": fetched_at, "generatedAt": generated_at,
+                **catalog_source_metadata(store, generated_at), "error": error or pack.get("error", "")}
 
     if action == "index-readmes":
         if not preferences["readmeEnrichment"] or not preferences["readmeIndexing"] or local_only or error:
             return {"ok": True, "action": action, "generation": generation,
                     "readmeIndex": readme_index_data(store, items, now=current_time), "error": error}
         return {"ok": True, "action": action, "generation": generation,
-                "readmeIndex": index_readmes(store, items, current_time), "error": ""}
+                "readmeIndex": index_readmes(store, items, current_time, **({"progress": emit} if progress is not None else {})), "error": ""}
 
     if action == "install-plugin":
         target_id = plugin_id(request.get("pluginId"))
@@ -5614,6 +6087,9 @@ def run(
             "categories": sorted({item["category"] for item in items if item["category"]}),
             "fetchedAt": fetched_at,
             "generatedAt": generated_at,
+            **catalog_source_metadata(store, generated_at),
+            "searchPack": {**search_pack_state(store, current_time),
+                           "enabled": preferences["readmeEnrichment"] and preferences["readmeIndexing"]},
             "readmesFetched": 0,
             "readmeIndex": readme_index_data(store, items, now=current_time),
             "readmePluginId": "",
@@ -5634,7 +6110,7 @@ def run(
     scan = supplied_scan(request, store.memory.get("scan"), previous=action in {"analyze", "rescan"})
     previous_profile = validate_profile(request.get("previousProfile", request.get("profile", scan.get("observations", []))))
     if action in {"analyze", "rescan"}:
-        scanned = scan_profile()
+        scanned = scan_profile(**({"progress": emit} if progress is not None else {}))
         hardware_profile, unavailable, inventory = scanned
         scan = accepted_scan(scanned, scan, previous_profile, current_time)
         store.memory["scan"] = scan
@@ -5944,7 +6420,7 @@ def error_response(error: Exception, request: Any) -> dict[str, Any]:
         "errorCode": "inventory-unavailable" if "authoritative plugin inventory" in message else code,
         "retryable": "authoritative plugin inventory" in message,
         **({"event": "result", "final": True} if isinstance(request, dict) and
-           request.get("streamProgress") is True and action in PLUGIN_MUTATIONS else {}),
+           request.get("streamProgress") is True and action in PROGRESS_ACTIONS else {}),
     }
 
 
@@ -5956,11 +6432,11 @@ def process_request(
         if len(raw) > MAX_REQUEST_BYTES:
             raise ValueError("Outfit request exceeds its size limit.")
         request = safe_json_loads(raw, "Outfit request")
-        streaming = isinstance(request, dict) and request.get("streamProgress") is True and request.get("action") in PLUGIN_MUTATIONS
+        streaming = isinstance(request, dict) and request.get("streamProgress") is True and request.get("action") in PROGRESS_ACTIONS
         result = run(request, store, preferences_store=preferences_store, progress=write_response if streaming else None)
     except Exception as error:
         result = error_response(error, request)
-    if isinstance(request, dict) and request.get("streamProgress") is True and request.get("action") in PLUGIN_MUTATIONS:
+    if isinstance(request, dict) and request.get("streamProgress") is True and request.get("action") in PROGRESS_ACTIONS:
         result.update(event="result", final=True)
     return result
 

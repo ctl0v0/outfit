@@ -24,7 +24,7 @@ import time
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
-APP = "io.github.ctl0v0.omafit"
+APP = "io.github.ctl0v0.outfit"
 FIXTURE = "org.example.omafit-release-fixture"
 TITLE = "Outfit - Plugin Manager"
 PANEL_TITLE = "Outfit VM Fixture Panel"

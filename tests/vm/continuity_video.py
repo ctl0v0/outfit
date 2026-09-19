@@ -20,7 +20,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = "org.example.omafit-release-fixture"
-APP = "io.github.ctl0v0.omafit"
+APP = "io.github.ctl0v0.outfit"
 TITLE = "Outfit - Plugin Manager"
 
 

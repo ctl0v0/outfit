@@ -20,7 +20,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-APP = "io.github.ctl0v0.omafit"
+APP = "io.github.ctl0v0.outfit"
 IDS = ("org.example.omafit-release-fixture", "org.example.omafit-release-fixture-two")
 TITLE = "Outfit - Plugin Manager"
 

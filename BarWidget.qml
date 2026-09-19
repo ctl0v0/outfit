@@ -5,7 +5,7 @@ import "ui" as OutfitUi
 
 BarWidget {
   id: root
-  moduleName: "io.github.ctl0v0.omafit"
+  moduleName: "io.github.ctl0v0.outfit"
 
   readonly property var fitService: bar && bar.shell
     ? bar.shell.serviceFor(moduleName) : null

@@ -24,12 +24,12 @@ class LauncherMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)
             launcher.sync(data)
-            desktop = (data / "applications/io.github.ctl0v0.omafit.desktop").read_text()
-            icon = (data / "icons/hicolor/scalable/apps/io.github.ctl0v0.omafit.svg").read_text()
+            desktop = (data / "applications/io.github.ctl0v0.outfit.desktop").read_text()
+            icon = (data / "icons/hicolor/scalable/apps/io.github.ctl0v0.outfit.svg").read_text()
             self.assertIn("Name=Outfit\n", desktop)
             self.assertIn("X-Outfit-Managed=true\n", desktop)
-            self.assertIn("Exec=omarchy-shell shell summon io.github.ctl0v0.omafit\n", desktop)
-            self.assertIn("Icon=io.github.ctl0v0.omafit\n", desktop)
+            self.assertIn("Exec=omarchy-shell shell summon io.github.ctl0v0.outfit\n", desktop)
+            self.assertIn("Icon=io.github.ctl0v0.outfit\n", desktop)
             self.assertIn("<!-- Outfit managed icon -->", icon)
             self.assertIn("<title>Outfit</title>", icon)
 

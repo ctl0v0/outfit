@@ -57,7 +57,7 @@ function resolve(row, entry, context) {
   var batchOwned = (typeof operation.batchIndex === "number" && operation.batchIndex >= 0)
     || !!(operation.lastRequest && operation.lastRequest.batchItem)
     || context.batchFailure === true
-  var protectedPlugin = String(row.id || "") === String(context.selfId || "io.github.ctl0v0.omafit")
+  var protectedPlugin = String(row.id || "") === String(context.selfId || "io.github.ctl0v0.outfit") || String(row.id || "") === "io.github.ctl0v0.omafit"
   var canChange = known && !pending && !context.batchRunning && !protectedPlugin
   var canToggle = canChange && installed && entry.canDisable === true && !failed
   var canActivateBar = canChange && installed && fullBar && entry.enabled === false && entry.active !== true && !failed

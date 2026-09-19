@@ -18,13 +18,11 @@ TestCase {
   function finishJob(object, fields, jobName) {
     var jobs = findChild(object, jobName || "backgroundJobs")
     var process = findChild(jobs, "backgroundWorker")
-    var collector = findChild(jobs, "backgroundCollector")
     var result = fields
     result.ok = true
     result.action = jobs.activeRequest.action
     result.generation = jobs.activeRequest.generation
-    collector.text = JSON.stringify(result)
-    collector.streamFinished()
+    jobs.receiveLine(JSON.stringify(result))
     process.running = false
     process.exited(0, 0)
   }
@@ -135,6 +133,8 @@ TestCase {
     var object = service()
     respond(object, {catalogCount:100})
     object.hasAnalyzed = true
+    object.startupStarted = true
+    object.searchPreparationSettled = true
     object.editorOpened()
     verify(object.filtersExpanded)
     verify(object.tryIndexReadmes())
@@ -151,6 +151,8 @@ TestCase {
     var object = service()
     respond(object, {catalogCount:100})
     object.hasAnalyzed = true
+    object.startupStarted = true
+    object.searchPreparationSettled = true
     object.editorOpened()
     verify(object.tryIndexReadmes())
     verify(object.setIndexingPaused(true))
@@ -166,6 +168,8 @@ TestCase {
     var object = service()
     respond(object, {catalogCount:100})
     object.hasAnalyzed = true
+    object.startupStarted = true
+    object.searchPreparationSettled = true
     object.editorOpened()
     object.discoveryRows = [{id:"example.frozen"}]
     verify(object.tryIndexReadmes())
@@ -440,23 +444,29 @@ TestCase {
     findChild(object, "updateStatusExpiry").triggered()
     compare(object.updateStatus, "")
   }
-  function test_ignored_scan_does_not_claim_a_successful_update() {
+  function test_hardware_completion_does_not_replace_newer_inventory() {
     var object = service()
     respond(object, {})
     verify(object.rescan(false))
     object.inventoryRevision++
+    object.inventory = [{id:"example.newer"}]
     finishJob(object, {profile:[],inventory:[],installed:[],inventoryAuthoritative:true,unavailable:[]})
-    compare(object.updateStatus, "")
-    compare(object.lastHardwareCheckAt, 0)
+    compare(object.updateStatus, "System updated")
+    verify(object.lastHardwareCheckAt > 0)
+    verify(object.hasAnalyzed)
+    compare(object.inventoryRevision, 1)
+    compare(object.inventory[0].id, "example.newer")
   }
   function test_background_error_remains_visible_after_query_and_optional_warning_is_retained() {
     var object = service()
     respond(object, {})
     object.hasAnalyzed = true
     verify(object.refresh("", ""))
+    compare(object.startupActivity.catalog.state, "running")
     verify(object.quickSetup("", "", "stars", 1))
     findChild(object, "backgroundJobs").stop("Fixture network failure")
     compare(object.backgroundError, "Fixture network failure")
+    compare(object.startupActivity.catalog.state, "error")
     compare(object.updateStatus, "")
     respond(object, {setup:{rows:[]}})
     compare(object.error, "Fixture network failure")
@@ -466,6 +476,7 @@ TestCase {
       notice:"Marketplace catalog refreshed."})
     compare(object.backgroundError, "")
     compare(object.updateStatus, "Catalog updated")
+    compare(object.startupActivity.catalog.state, "complete")
     compare(object.dataWarning, "Popularity unavailable; using saved totals.")
     compare(object.setupRefreshNotice, "")
   }
@@ -477,6 +488,7 @@ TestCase {
     object.editorClosed()
     verify(!object.backgroundBusy)
     compare(object.backgroundError, "")
+    compare(object.startupActivity.catalog.state, "waiting")
     compare(object.error, "")
     compare(object.updateStatus, "")
   }

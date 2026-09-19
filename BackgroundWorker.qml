@@ -15,7 +15,52 @@ Item {
   property var response: null
   property string failure: ""
   property bool cancelled: false
+  property bool lowPriority: false
+  property int outputBytes: 0
+  property int outputLines: 0
+  property int progressSequence: 0
+  readonly property int maxLineBytes: 4194304
+  readonly property int maxOutputBytes: 16777216
+  readonly property int maxOutputLines: 8192
   signal finished(var result, var request)
+  signal progress(var event, var request)
+
+  // One bounded JSON object per line; old helpers may still send just a final.
+  function receiveLine(raw) {
+    if (!active || failure) return
+    var line = String(raw || "")
+    var bytes = 0
+    for (var i = 0; i < line.length; i++) {
+      var code = line.charCodeAt(i)
+      bytes += code < 128 ? 1 : code < 2048 ? 2 : 3
+    }
+    outputBytes += bytes
+    outputLines++
+    if (bytes > maxLineBytes || outputBytes > maxOutputBytes || outputLines > maxOutputLines) {
+      stop("Background output exceeded its limit. Retry the action.")
+      return
+    }
+    if (!line.trim()) return
+    var event
+    try { event = JSON.parse(line) } catch (error) {
+      stop("The background helper returned unreadable data. Retry the action.")
+      return
+    }
+    if (!event || event.action !== activeRequest.action
+        || Number(event.generation) !== activeRequest.generation) return
+    if (event.responseKind === "progress" || event.final === false) {
+      if (received || event.responseKind !== "progress" || event.final !== false) return
+      var sequence = Number(event.sequence)
+      if (!isFinite(sequence) || sequence <= progressSequence || Math.floor(sequence) !== sequence) return
+      progressSequence = sequence
+      progress(event, activeRequest)
+      return
+    }
+    if (received) return
+    response = event
+    received = true
+    finish()
+  }
 
   function submit(action, values) {
     if (active || !helperPath) return false
@@ -31,6 +76,9 @@ Item {
     exited = false
     started = false
     exitCode = 0
+    outputBytes = 0
+    outputLines = 0
+    progressSequence = 0
     active = true
     worker.stdinEnabled = true
     launchDeadline.restart()
@@ -57,7 +105,7 @@ Item {
     drain.stop()
     var request = activeRequest
     var result = response
-    if (!result || failure || Number(result.generation) !== request.generation
+    if (!result || failure || (exitCode !== 0 && result.ok === true) || Number(result.generation) !== request.generation
         || result.action !== request.action) result = {
       ok: false, action: request.action, generation: request.generation,
       error: failure || "Outfit's background helper returned an invalid response. Retry the action.",
@@ -76,15 +124,18 @@ Item {
   }
   Timer {
     id: deadline
-    interval: ["enrich", "refresh", "index-readmes"].indexOf(root.activeRequest.action) >= 0 ? 90000 : 45000
+    objectName: "backgroundDeadline"
+    interval: root.activeRequest.action === "prepare-search" ? 180000
+      : ["enrich", "refresh", "index-readmes", "catalog-refresh"].indexOf(root.activeRequest.action) >= 0 ? 90000 : 45000
     onTriggered: root.stop("Background work timed out. Cached results remain available; retry the action.")
   }
   Timer { id: killDeadline; interval: 2000; onTriggered: if (worker.processId > 0) worker.signal(9) }
-  Timer { id: drain; interval: 50; onTriggered: { root.received = true; root.finish() } }
+  Timer { id: drain; objectName: "backgroundDrain"; interval: 100; onTriggered: { root.received = true; root.finish() } }
   Process {
     id: worker
     objectName: "backgroundWorker"
-    command: ["/usr/bin/python3", "-I", "-B", root.helperPath]
+    command: root.lowPriority ? ["/usr/bin/nice", "-n", "10", "/usr/bin/python3", "-I", "-B", root.helperPath]
+      : ["/usr/bin/python3", "-I", "-B", root.helperPath]
     stdinEnabled: true
     onStarted: {
       if (!root.active || root.failure) { running = false; return }
@@ -94,14 +145,9 @@ Item {
       stdinEnabled = false
       deadline.restart()
     }
-    stdout: StdioCollector {
-      objectName: "backgroundCollector"
-      waitForEnd: true
-      onStreamFinished: {
-        try { root.response = JSON.parse(text) } catch (error) { root.response = null }
-        root.received = true
-        root.finish()
-      }
+    stdout: SplitParser {
+      objectName: "backgroundParser"
+      onRead: function(line) { root.receiveLine(line) }
     }
     onExited: function(code) {
       root.exitCode = code

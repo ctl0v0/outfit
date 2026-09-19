@@ -230,11 +230,11 @@ class LauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)
             launcher.sync(data)
-            desktop = data / "applications/io.github.ctl0v0.omafit.desktop"
+            desktop = data / "applications/io.github.ctl0v0.outfit.desktop"
             before = desktop.stat().st_mtime_ns
             launcher.sync(data)
             self.assertEqual(before, desktop.stat().st_mtime_ns)
-            self.assertIn("Exec=omarchy-shell shell summon io.github.ctl0v0.omafit", desktop.read_text())
+            self.assertIn("Exec=omarchy-shell shell summon io.github.ctl0v0.outfit", desktop.read_text())
             launcher.sync(data, remove=True)
             self.assertFalse(desktop.exists())
             desktop.write_text("[Desktop Entry]\nName=My custom launcher\n")

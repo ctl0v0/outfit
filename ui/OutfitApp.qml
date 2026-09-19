@@ -19,6 +19,10 @@ Item {
   property var shell: null
   property var manifest: null
   property var service: null
+  readonly property bool canBrowse: Boolean(service && (service.canBrowse === true
+    || (service.canBrowse === undefined && service.cacheLoaded)))
+  readonly property bool canManagePlugins: Boolean(service && (service.canManagePlugins === true
+    || (service.canManagePlugins === undefined && service.inventoryReady)))
   // The detail redesign is a fixture-only review surface until its controls
   // and capability model have been approved for production integration.
   readonly property bool detailPrototypeSession: Boolean(service && service.demoRoot)
@@ -97,7 +101,7 @@ Item {
         root.keyboardHelpInput()
     })
   }
-  onOpenedChanged: if (!opened) { notePointerHelpInput(); dismissTooltips() }
+  onOpenedChanged: if (!opened) { notePointerHelpInput(); dismissTooltips(); backgroundActivity.close() }
   onBrowseDensityChanged: dismissTooltips()
   onWorkspaceViewChanged: dismissTooltips()
 
@@ -275,7 +279,7 @@ Item {
   }
 
   readonly property string pluginId: manifest && manifest.id
-    ? String(manifest.id) : "io.github.ctl0v0.omafit"
+    ? String(manifest.id) : "io.github.ctl0v0.outfit"
   readonly property color foreground: Color.foreground
   readonly property color background: Color.background
   readonly property color secondary: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.64)
@@ -1281,14 +1285,14 @@ Item {
   }
 
   function applyFilters() {
-    if (service && service.hasAnalyzed && typeof service.search === "function")
+    if (canBrowse && typeof service.search === "function")
       service.search(
         searchField.text.trim(), chosenCategory,
         service.currentInstallFilter, service.currentPartyFilter)
   }
 
   function chooseFilters(installFilter, partyFilter) {
-    if (!service || !service.hasAnalyzed) return
+    if (!canBrowse) return
     service.search(
       searchField.text.trim(), chosenCategory,
       installFilter || service.currentInstallFilter,
@@ -1532,7 +1536,7 @@ Item {
         batchFailure = true
     }
     return InspectorState.resolve(row, canonicalEntry(row), {
-      inventoryReady: service && service.inventoryReady === true,
+      inventoryReady: root.canManagePlugins,
       operation: operation,
       selected: row && service && service.setupSelected(row.id),
       batchRunning: service && service.batchRunning,
@@ -1807,7 +1811,7 @@ Item {
       return "Searching listings and selected README content."
     }
     if (service.batchRunning) return "Batch install is installing plugins in sequence."
-    if (!service.hasAnalyzed) return "Waiting for the automatic local fit check."
+    if (!service.hasAnalyzed) return "Browse now — catalog search is ready. Local fit checks are optional."
     return resultRows.length + " matches using this system's hardware and capabilities."
   }
 
@@ -1817,7 +1821,9 @@ Item {
     if (service.mutationActive) return service.pluginProgress(service.activeMutation.pluginId)
     if (service.hasCheckingOperations()) return "Checking plugin state…"
     if (service.mutationBusy) return "Updating plugin…"
+    if (service.startupBannerVisible) return String(service.startupSummary || "")
     if (service.backgroundBusy) {
+      if (service.startupQuiet || service.startupDismissed) return ""
       if (service.backgroundAction === "analyze") return "Checking system…"
       if (service.backgroundAction === "rescan")
         return service.backgroundAutomatic ? String(service.updateStatus || "") : "Checking system…"
@@ -4294,6 +4300,7 @@ Item {
           anchors.right: parent.right
           height: Math.max(Style.space(38), workspaceTabs.visible ? workspaceTabs.implicitHeight : 0)
             + Style.space(26)
+          objectName: "workspaceHeader"
 
           Button {
             id: settingsBack
@@ -4338,9 +4345,12 @@ Item {
           }
             Text {
               id: headerStatus
+              objectName: "startupBanner"
               anchors.left: parent.left
-              anchors.right: parent.right
+              anchors.right: startupBannerActions.visible ? startupBannerActions.left : parent.right
+              anchors.rightMargin: Style.space(8)
               anchors.bottom: parent.bottom
+              anchors.bottomMargin: Style.space(4)
               visible: Boolean(text)
               text: root.busySubtitle()
               textFormat: Text.PlainText
@@ -4349,6 +4359,47 @@ Item {
               font.family: root.fontFamily
               font.pixelSize: root.readingSize
               elide: Text.ElideRight
+            }
+            Rectangle {
+              objectName: "startupProgress"
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              height: Style.space(2)
+              readonly property real fraction: root.service && root.service.startupBannerVisible
+                ? root.service.measuredProgress(root.service.startupProgress) : -1
+              visible: fraction >= 0
+              color: root.faint
+              Rectangle { height: parent.height; width: parent.width * Math.max(0, parent.fraction); color: Color.accent }
+            }
+            Row {
+              id: startupBannerActions
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              anchors.bottomMargin: Style.space(3)
+              visible: Boolean(root.service && root.service.startupBannerVisible)
+              spacing: Style.space(8)
+              FilterButton {
+                objectName: "startupDetails"
+                text: "Details"
+                implicitHeight: Style.space(22)
+                topPadding: 0; bottomPadding: 0
+                onClicked: { backgroundActivity.invoker = this; backgroundActivity.open() }
+              }
+              FilterButton {
+                objectName: "startupDismiss"
+                text: "Dismiss"
+                implicitHeight: Style.space(22)
+                topPadding: 0; bottomPadding: 0
+                onClicked: root.service.startupDismissed = true
+              }
+            }
+            BackgroundActivity {
+              id: backgroundActivity
+              parent: focusScope
+              boundsItem: focusScope
+              anchorItem: workspaceHeader
+              service: root.service
             }
 
           Row {
@@ -4359,6 +4410,7 @@ Item {
 
             HeaderButton {
               id: moreActionsButton
+              objectName: "moreActionsButton"
               iconKind: "more"
               accessibleLabel: "More actions"
               enabled: root.headerNavigationEnabled
@@ -4407,8 +4459,8 @@ Item {
                 moreActionsButton.forceActiveFocus()
             }
             function moveFocus(direction) {
-              var buttons = [rescanAction, refreshAction, menuIndexStatus.toggleButton]
-              var current = rescanAction.activeFocus ? 0 : (refreshAction.activeFocus ? 1 : menuIndexStatus.toggleButton.activeFocus ? 2 : -1)
+              var buttons = [activityAction, rescanAction, refreshAction, menuIndexStatus.toggleButton]
+              var current = buttons.findIndex(function(button) { return button.activeFocus })
               if (current < 0 && direction < 0) current = 0
               for (var step = 1; step <= buttons.length; step++) {
                 var index = (current + direction * step + buttons.length * 2) % buttons.length
@@ -4459,6 +4511,20 @@ Item {
                 event.accepted = true
               }
               MaintenanceAction {
+                id: activityAction
+                objectName: "backgroundActivityAction"
+                width: parent.width
+                label: "Background activity"
+                description: "Preparation details and progress."
+                iconKind: "scan"
+                Keys.forwardTo: [maintenanceActions]
+                onClicked: {
+                  maintenanceMenu.close()
+                  backgroundActivity.invoker = moreActionsButton
+                  backgroundActivity.open()
+                }
+              }
+              MaintenanceAction {
                 id: rescanAction
                 width: parent.width
                 label: "Rescan system"
@@ -4478,7 +4544,7 @@ Item {
                 iconKind: "refresh"
                 description: "Marketplace listings and counts."
                 Keys.forwardTo: [maintenanceActions]
-                enabled: root.service && !root.service.backgroundBusy && !root.service.mutationBusy
+                enabled: root.service && !root.service.backgroundBusy && !root.service.catalogBusy && !root.service.mutationBusy
                 onClicked: {
                   maintenanceMenu.dismiss(true)
                   root.service.refresh(root.service.currentQuery, root.service.currentCategory)
@@ -4567,7 +4633,7 @@ Item {
               foreground: root.foreground
               placeholderText: "Search tasks, hardware, or plugins"
               maximumLength: 160
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse
               onTextEdited: searchDebounce.restart()
               onAccepted: root.applyFilters()
             }
@@ -4579,7 +4645,7 @@ Item {
               fontFamily: root.fontFamily
               options: root.categoryOptions
               value: root.chosenCategory
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse
               onChanged: function(value) {
                 root.chosenCategory = value
                 root.applyFilters()
@@ -4596,21 +4662,21 @@ Item {
               text: "Any status"
               foreground: root.foreground
               selected: root.service && root.service.currentInstallFilter === "all"
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse
               onClicked: root.chooseFilters("all", "")
             }
             Button {
               text: "Installed " + root.filterCount("installed")
               foreground: root.foreground
               selected: root.service && root.service.currentInstallFilter === "installed"
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse && root.canManagePlugins
               onClicked: root.chooseFilters("installed", "")
             }
             Button {
               text: "Available " + root.filterCount("available")
               foreground: root.foreground
               selected: root.service && root.service.currentInstallFilter === "available"
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse && root.canManagePlugins
               onClicked: root.chooseFilters("available", "")
             }
           }
@@ -4624,21 +4690,21 @@ Item {
               text: "Any source"
               foreground: root.foreground
               selected: root.service && root.service.currentPartyFilter === "all"
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse
               onClicked: root.chooseFilters("", "all")
             }
             Button {
               text: "First party " + root.filterCount("firstParty")
               foreground: root.foreground
               selected: root.service && root.service.currentPartyFilter === "first-party"
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse
               onClicked: root.chooseFilters("", "first-party")
             }
             Button {
               text: "Third party " + root.filterCount("thirdParty")
               foreground: root.foreground
               selected: root.service && root.service.currentPartyFilter === "third-party"
-              enabled: root.service && root.service.hasAnalyzed
+              enabled: root.canBrowse
               onClicked: root.chooseFilters("", "third-party")
             }
           }
@@ -4700,7 +4766,7 @@ Item {
             }
             Text {
               width: parent.width
-              text: "Outfit is reading bounded local hardware and capability signals. Marketplace metadata and candidate READMEs are fetched only as configured in Settings."
+              text: "Opening saved marketplace listings. Plugin checks and optional documentation preparation continue in the background."
               textFormat: Text.PlainText
               horizontalAlignment: Text.AlignHCenter
               color: root.secondary
@@ -4735,7 +4801,7 @@ Item {
 
         Item {
           visible: !root.settingsOpen && root.activeView === "fit"
-            && root.service && root.service.hasAnalyzed
+            && root.canBrowse
           anchors.top: root.narrowWorkspace && root.narrowDetailOpen
             ? workspaceHeader.bottom : statusSurface.bottom
           anchors.topMargin: Style.space(14)
@@ -6423,9 +6489,10 @@ Item {
               spacing: Style.space(7)
 
               Text {
-                visible: root.service && root.service.hasAnalyzed && !root.service.inventoryReady
+                visible: root.service && root.service.startupActivity
+                  && root.service.startupActivity.inventory.state === "error" && !root.canManagePlugins
                 width: parent.width
-                text: "Inventory unavailable. Rescan system to enable plugin changes."
+                text: "Plugin checks need attention. Open Background activity in More actions to retry."
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 color: root.secondary

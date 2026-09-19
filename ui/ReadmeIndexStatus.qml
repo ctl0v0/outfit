@@ -11,13 +11,15 @@ Column {
   property var navigationTarget: null
   property color foreground: Color.foreground
   readonly property var counts: service && service.readmeIndex ? service.readmeIndex : ({})
+  readonly property var documents: counts.documents ? (service.documentCounts || counts.documents) : null
   readonly property alias toggleButton: indexToggle
   readonly property bool paused: service && service.preferences.readmeIndexing === false
   readonly property bool disabled: service && service.preferences.readmeEnrichment === false
   spacing: Style.space(6)
   Text {
     width: parent.width
-    text: "README search · " + Number(root.counts.indexed || 0) + " / " + Number(root.counts.eligible || 0) + " indexed"
+    text: root.documents ? "Documentation search · " + Number(root.documents.indexed || 0) + " searchable"
+      : "README search · " + Number(root.counts.indexed || 0) + " / " + Number(root.counts.eligible || 0) + " indexed"
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
     color: root.foreground
@@ -28,13 +30,15 @@ Column {
   Text {
     width: parent.width
     text: (root.disabled ? "Disabled in Settings." : root.paused ? "Indexing paused; cached text is searchable."
+      : root.service && root.service.preparingSearch ? "Preparing the search library in the background…"
+      : root.service && root.service.libraryPrepared ? "Library prepared. Available documentation is searchable."
       : root.service && root.service.indexingBusy ? "Indexing in the background…"
       : !root.counts.eligible ? "Waiting for marketplace listings."
       : Number(root.counts.retryAt || 0) * 1000 > Date.now() ? "Waiting before retrying GitHub."
       : Number(root.counts.due || 0) > 0 ? "Continues while Outfit is open." : "Index is up to date for available documents.")
-      + (root.counts.pending ? " " + root.counts.pending + " pending." : "")
-      + (root.counts.unavailable ? " " + root.counts.unavailable + " unavailable." : "")
-      + (root.counts.failed ? " " + root.counts.failed + " will retry." : "")
+      + ((root.documents || root.counts).pending ? " " + (root.documents || root.counts).pending + " pending." : "")
+      + ((root.documents || root.counts).unavailable ? " " + (root.documents || root.counts).unavailable + " unavailable (checked)." : "")
+      + ((root.documents || root.counts).failed ? " " + (root.documents || root.counts).failed + " will retry." : "")
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
     color: root.foreground

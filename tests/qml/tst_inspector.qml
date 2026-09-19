@@ -5,7 +5,7 @@ import "../../ui/InspectorState.js" as State
 TestCase {
   name: "InspectorPresentation"
   function context(extra) {
-    var value = { inventoryReady:true, selected:false, batchRunning:false, selfId:"io.github.ctl0v0.omafit" }
+    var value = { inventoryReady:true, selected:false, batchRunning:false, selfId:"io.github.ctl0v0.outfit" }
     for (var key in (extra || {})) value[key] = extra[key]
     return value
   }
@@ -43,7 +43,7 @@ TestCase {
   }
   function test_self_protection_keeps_widget_placement_available() {
     var self = row()
-    self.id = "io.github.ctl0v0.omafit"
+    self.id = "io.github.ctl0v0.outfit"
     var own = State.resolve(self, entry(true), context())
     verify(!own.canRemove && !own.canToggle)
     verify(own.canPlace)
@@ -112,7 +112,7 @@ TestCase {
     state = State.resolve(row(), local, context())
     verify(state.canOpen)
     verify(!state.canRemove)
-    local.id = "io.github.ctl0v0.omafit"
+    local.id = "io.github.ctl0v0.outfit"
     state = State.resolve({id:local.id}, local, context())
     verify(!state.canOpen && !state.canToggle && !state.canActivateBar)
     compare(state.action, "")

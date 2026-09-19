@@ -34,12 +34,14 @@ class OutfitTests(unittest.TestCase):
         self.assertNotIn("Panel.qml", widget)
         self.assertFalse((ROOT / "Panel.qml").exists())
 
-    def test_opening_analyzes_automatically_and_network_controls_are_settings(self) -> None:
+    def test_opening_starts_independent_checks_and_network_controls_are_settings(self) -> None:
         editor = (ROOT / "ui" / "OutfitApp.qml").read_text()
         service = (ROOT / "Service.qml").read_text()
         settings_page = editor.index("id: settingsPage")
 
-        self.assertIn("if (!root.hasAnalyzed)", service)
+        self.assertIn("root.startInventoryCheck()", service)
+        self.assertIn("root.refreshCatalog(true)", service)
+        self.assertIn("root.preferences.watchHardware !== false && !root.hasAnalyzed", service)
         self.assertIn('backgroundRequest("analyze"', service)
         self.assertIn('accessibleLabel: "Settings"', editor)
         self.assertIn('text: "Back"', editor)
@@ -1359,7 +1361,7 @@ omarchy plugin add https://github.com/example/dock-helper
                 "layout": {
                     "left": ["omarchy.workspace"],
                     "center": [{"id": "example.dock-helper", "instanceId": "primary"}],
-                    "right": ["io.github.ctl0v0.omafit"],
+                    "right": ["io.github.ctl0v0.outfit"],
                 },
             },
         }
@@ -1374,7 +1376,7 @@ omarchy plugin add https://github.com/example/dock-helper
         )
         self.assertEqual(sections["omarchy.workspace"], "left")
         self.assertEqual(sections["example.dock-helper"], "center")
-        self.assertEqual(sections["io.github.ctl0v0.omafit"], "right")
+        self.assertEqual(sections["io.github.ctl0v0.outfit"], "right")
 
     def test_bar_section_scan_treats_malformed_layout_as_unknown(self) -> None:
         malformed_configs = [

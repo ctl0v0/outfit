@@ -11,7 +11,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--output", required=True, type=Path)
 args = parser.parse_args()
 ROOT = Path(__file__).resolve().parents[2]
-ID = "io.github.ctl0v0.omafit"
+ID = "io.github.ctl0v0.outfit"
 if (os.environ.get("OUTFIT_TEST_VM") or os.environ.get("OMAFIT_TEST_VM")) != "1" or subprocess.run(
         ["systemd-detect-virt", "--vm"], stdout=subprocess.DEVNULL).returncode:
     raise SystemExit("Only run this check in the disposable VM.")

@@ -406,7 +406,7 @@ TestCase {
     }
     // The same corner decoration remains readable on a decoded image, not just
     // the loading/missing-image placeholder. This local asset stays in QtTest.
-    image.source = Qt.resolvedUrl("../../assets/io.github.ctl0v0.omafit.svg")
+    image.source = Qt.resolvedUrl("../../assets/io.github.ctl0v0.outfit.svg")
     tryCompare(image, "status", Image.Ready)
     verify(tag.visible)
     mouseClick(tag, tag.width / 2, tag.height / 2)

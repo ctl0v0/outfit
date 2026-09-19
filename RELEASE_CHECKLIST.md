@@ -21,7 +21,7 @@ is available:
    development host link. Record Omarchy, Qt and Python versions.
 2. Run `omarchy plugin add https://github.com/ctl0v0/outfit.git --enable`, then record
    the installed revision with
-   `git -C "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.ctl0v0.omafit" rev-parse HEAD`.
+   `git -C "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.ctl0v0.outfit" rev-parse HEAD`.
    Confirm it matches the intended public candidate.
 3. Open the Outfit bar widget (add it under **Other** if needed). Optionally run
    the launcher command in README and check Apps search. Verify Browse, search,

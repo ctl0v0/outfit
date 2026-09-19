@@ -2,7 +2,7 @@
 import json
 import time
 
-ID = "io.github.ctl0v0.omafit"
+ID = "io.github.ctl0v0.outfit"
 
 
 def verify(run, window, state, output, browse_sort):

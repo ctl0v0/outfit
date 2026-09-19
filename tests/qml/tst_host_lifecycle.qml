@@ -50,10 +50,8 @@ TestCase {
     verify(worker.active)
     var request = JSON.parse(JSON.stringify(worker.activeRequest))
     var process = findChild(worker, "backgroundWorker")
-    var collector = findChild(worker, "backgroundCollector")
-    collector.text = JSON.stringify({ok:ok !== false,action:"host-lifecycle",generation:request.generation,
-      host:host, error:ok === false ? "Fixture transport failure /private/should-not-be-published" : ""})
-    collector.streamFinished()
+    worker.receiveLine(JSON.stringify({ok:ok !== false,action:"host-lifecycle",generation:request.generation,
+      host:host, error:ok === false ? "Fixture transport failure /private/should-not-be-published" : ""}))
     process.running = false
     process.exited(0, 0)
     pauseAdvance(object)

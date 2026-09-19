@@ -35,7 +35,7 @@ env = dict(os.environ, GIT_AUTHOR_NAME="Outfit fixture", GIT_AUTHOR_EMAIL="fixtu
            GIT_COMMITTER_NAME="Outfit fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
 for command in (["init", "-b", "main"], ["add", "."], ["commit", "-m", "Fictional lifecycle fixture"]):
     subprocess.run(["git", "-C", str(source), *command], env=env, check=True, capture_output=True)
-run("omarchy-shell", "shell", "summon", "io.github.ctl0v0.omafit", "{}")
+run("omarchy-shell", "shell", "summon", "io.github.ctl0v0.outfit", "{}")
 time.sleep(2)
 samples = []
 phase = "baseline"
@@ -71,7 +71,7 @@ try:
         # Reopen only between phases if the host destroyed the app, so every
         # phase starts with a visible sentinel; never during the measurement.
         phase = "between-operations"
-        run("omarchy-shell", "shell", "summon", "io.github.ctl0v0.omafit", "{}")
+        run("omarchy-shell", "shell", "summon", "io.github.ctl0v0.outfit", "{}")
         time.sleep(1)
 finally:
     stop.set()

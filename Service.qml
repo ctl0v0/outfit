@@ -20,8 +20,8 @@ Item {
   readonly property string demoRoot: demoRootEnv.charAt(0) === "/" ? demoRootEnv : ""
   readonly property string helperPath: decodeURIComponent(
     Qt.resolvedUrl(demoRoot ? "demo/fixture_worker.py" : "scripts/outfit.py").toString().replace(/^file:\/\//, ""))
-  readonly property string configRoot: (demoRoot ? demoRoot + "/config" : MediaPaths.xdg(Quickshell.env("XDG_CONFIG_HOME"), Quickshell.env("HOME"), ".config")) + "/io.github.ctl0v0.omafit"
-  readonly property string cacheRoot: (demoRoot ? demoRoot + "/cache" : MediaPaths.xdg(Quickshell.env("XDG_CACHE_HOME"), Quickshell.env("HOME"), ".cache")) + "/io.github.ctl0v0.omafit"
+  readonly property string configRoot: (demoRoot ? demoRoot + "/config" : MediaPaths.xdg(Quickshell.env("XDG_CONFIG_HOME"), Quickshell.env("HOME"), ".config")) + "/io.github.ctl0v0.outfit"
+  readonly property string cacheRoot: (demoRoot ? demoRoot + "/cache" : MediaPaths.xdg(Quickshell.env("XDG_CACHE_HOME"), Quickshell.env("HOME"), ".cache")) + "/io.github.ctl0v0.outfit"
   readonly property string batchJournalPath: configRoot + "/quick-setup.json"
 
   property var rows: []
@@ -56,36 +56,355 @@ Item {
   property string indexedCatalogRevision: ""
   readonly property bool indexingBusy: readmeIndexer.active
   readonly property bool indexingEnabled: root.preferences.readmeEnrichment !== false
-    && root.preferences.readmeIndexing !== false
+    && root.preferences.readmeIndexing !== false && !root.indexingPauseRequested
+  property bool indexingPauseRequested: false
+  onIndexingEnabledChanged: if (!root.indexingEnabled) {
+    readmeIndexer.stop("README indexing disabled.", true)
+    searchPreparationWorker.stop("Documentation preparation disabled.", true)
+  }
+
+  readonly property bool canBrowse: cacheLoaded && catalogCount > 0
+  readonly property bool canManagePlugins: inventoryReady
+  property string catalogSource: "none"
+  property string catalogBuiltAt: ""
+  property string sourceDate: ""
+  property var searchPack: ({state:"unknown"})
+  // Last seed failure is independent of the currently running local index batch.
+  property bool searchPreparationFailed: false
+  property real searchPreparationRetryAt: 0
+  readonly property bool searchPackReceiptFailed: Boolean(searchPack.error)
+    || ["failed", "error", "unavailable"].indexOf(String(searchPack.state)) >= 0
+  readonly property bool searchPackFailed: searchPreparationFailed || searchPackReceiptFailed
+  readonly property real searchPackRetryAt: {
+    var receipt = Number(root.searchPack.nextCheckAt) * 1000
+    return Math.max(root.searchPreparationRetryAt,
+      root.searchPackReceiptFailed && isFinite(receipt) ? receipt : 0)
+  }
+  property bool startupStarted: false
+  property bool startupQuiet: false
+  property bool startupDismissed: false
+  property bool searchPreparationAttempted: false
+  property bool searchPreparationSettled: false
+  property int searchPreparationBusyRetries: 0
+  property var startupReceipt: null
+  property real nextSearchPreparationAt: 0
+  readonly property bool inventoryBusy: inventoryWorker.active
+  readonly property bool catalogBusy: catalogWorker.active
+  readonly property bool preparingSearch: searchPreparationWorker.active
+  property var startupActivity: ({
+    catalog:{state:"waiting"}, inventory:{state:"waiting"},
+    hardware:{state:"waiting"}, documentation:{state:"waiting"}
+  })
+  readonly property var documentCounts: root.documentCoverage(root.readmeIndex.documents)
+  function documentCoverage(raw) {
+    if (!raw || typeof raw !== "object") return ({})
+    var counts = ({})
+    for (var key of ["total", "indexed", "processed", "pending", "unavailable", "failed", "skipped"]) {
+      var value = Number(raw[key])
+      counts[key] = isFinite(value) && value >= 0 ? Math.floor(value) : 0
+    }
+    // Seed-excluded documents still require local upstream checks. Older helper
+    // summaries included them in processed/skipped while keeping them due.
+    counts.processed = Math.min(counts.total, counts.processed,
+      counts.indexed + counts.unavailable + counts.failed)
+    counts.pending = Math.max(counts.pending, counts.total - counts.processed)
+    return counts
+  }
+  readonly property bool libraryPrepared: Number(documentCounts.total) > 0
+    && Number(documentCounts.pending) === 0 && Number(documentCounts.failed) === 0
+    && Number(documentCounts.processed) >= Number(documentCounts.total)
+  readonly property bool startupBannerVisible: cacheLoaded && !startupQuiet && !startupDismissed
+  readonly property string startupSummary: !canBrowse ? (startupActivity.catalog.state === "error"
+    ? "Catalog unavailable — open Details to retry." : "Preparing the plugin catalog…")
+    : !inventoryReady ? (startupActivity.inventory.state === "error"
+      ? "Browse now — plugin checks need attention." : "Browse now — checking installed plugins…")
+    : preparingSearch ? "Browse now — preparing documentation search…"
+    : preferences.readmeEnrichment === false ? "Browse now — documentation updates are disabled."
+    : !indexingEnabled ? "Browse now — documentation updates are paused."
+    : libraryPrepared ? "Library prepared — available documentation is searchable."
+    : searchPackFailed ? (indexingBusy ? "Browse now — adding local documentation; search library unavailable."
+      : "Browse now — search library unavailable. Local search is retained.")
+    : startupActivity.documentation.state === "error" ? "Browse now — documentation will retry later."
+    : indexingBusy ? "Browse now — adding searchable documentation…"
+    : "Browse now — catalog search is ready."
+  readonly property var startupProgress: preparingSearch ? startupActivity.documentation
+    : indexingBusy ? startupActivity.documentation : ({})
+
+  function setActivity(lane, values) {
+    var state = JSON.parse(JSON.stringify(root.startupActivity))
+    state[lane] = values
+    root.startupActivity = state
+  }
+  function activityProgress(lane, event) {
+    // Never expose helper messages, probe names or device addresses in progress.
+    var phase = String(event.phase || "")
+    var value = {state:"running", phase:["manifest", "download", "import", "commit", "catalog",
+      "inventory", "scan", "index", "documentation"].indexOf(phase) >= 0 ? phase : "working"}
+    for (var key of ["processed", "total", "bytesReceived", "bytesTotal"]) {
+      var count = Number(event[key])
+      if (event[key] !== undefined && isFinite(count) && count >= 0) value[key] = count
+    }
+    if (lane === "documentation" && phase === "index" && event.documents) {
+      value.documents = root.documentCoverage(event.documents)
+      value.processed = value.documents.processed
+      value.total = value.documents.total
+    }
+    root.setActivity(lane, value)
+  }
+  function measuredProgress(value) {
+    if (!value) return -1
+    var total = Number(value.bytesTotal), done = Number(value.bytesReceived)
+    if (!(total > 0 && isFinite(done))) { total = Number(value.total); done = Number(value.processed) }
+    return total > 0 && isFinite(done) && done >= 0 ? Math.min(1, done / total) : -1
+  }
+  function startStartup() {
+    if (!root.cacheLoaded || !root.editorOpen || root.mutationBusy) return false
+    if (!root.startupStarted) {
+      root.startupStarted = true
+      root.startInventoryCheck()
+      root.refreshCatalog(true)
+      if (root.preferences.watchHardware !== false && !root.hasAnalyzed) root.analyze()
+      else root.setActivity("hardware", {state:root.hasAnalyzed ? "complete" : "disabled"})
+    }
+    return true
+  }
+  function startInventoryCheck() {
+    if (root.mutationBusy || inventoryWorker.active) return false
+    var started = inventoryWorker.submit("verify-inventory", {inventoryRevision:root.inventoryRevision,
+      mutationGeneration:root.mutationGeneration, streamProgress:true})
+    if (started) root.setActivity("inventory", {state:"running"})
+    return started
+  }
+  function finishStartupInventory(result, request) {
+    if (result && result.cancelled) {
+      root.setActivity("inventory", {state:root.inventoryReady ? "complete" : "waiting"})
+      return
+    }
+    if (root.mutationBusy || request.inventoryRevision !== root.inventoryRevision
+        || request.mutationGeneration !== root.mutationGeneration) {
+      root.setActivity("inventory", {state:root.inventoryReady ? "complete" : "waiting"})
+      return
+    }
+    if (!result || result.ok !== true || result.inventoryAuthoritative !== true) {
+      root.setActivity("inventory", {state:"error"})
+      return
+    }
+    root.inventory = Array.isArray(result.inventory) ? result.inventory : []
+    root.installed = Array.isArray(result.installed) ? result.installed : []
+    root.unavailable = Array.isArray(result.unavailable) ? result.unavailable : []
+    root.inventoryReady = true
+    root.inventoryRevision++
+    root.setActivity("inventory", {state:"complete"})
+    root.reconcilePluginOperations()
+    root.reconcileTerminalOutcomes()
+    root.boardRefreshPending = true
+    root.queueBoardRefresh()
+    root.requestContext()
+    root.maybeSaveStartupReceipt()
+  }
+  function refreshCatalog(automatic) {
+    if (root.mutationBusy || catalogWorker.active || ["refresh", "enrich"].indexOf(root.backgroundAction) >= 0) return false
+    var started = catalogWorker.submit("catalog-refresh", {automatic:automatic === true, streamProgress:true})
+    if (started) root.setActivity("catalog", {state:"running"})
+    return started
+  }
+  function finishCatalog(result, request) {
+    if (result && result.cancelled) { root.setActivity("catalog", {state:"waiting"}); return }
+    if (!result || result.ok !== true) { root.setActivity("catalog", {state:"error"}); return }
+    if ("catalogCount" in result) root.catalogCount = Math.max(0, Number(result.catalogCount) || 0)
+    if (Array.isArray(result.categories)) root.categories = result.categories
+    if ("catalogSource" in result) root.catalogSource = String(result.catalogSource)
+    if ("catalogBuiltAt" in result) root.catalogBuiltAt = String(result.catalogBuiltAt || "")
+    if ("sourceDate" in result) root.sourceDate = String(result.sourceDate || "")
+    if (result.searchPack) root.searchPack = result.searchPack
+    if ("fetchedAt" in result) root.fetchedAt = Number(result.fetchedAt) || 0
+    if ("generatedAt" in result) root.generatedAt = String(result.generatedAt || "")
+    if ("likesFetchedAt" in result) root.likesFetchedAt = Number(result.likesFetchedAt) || 0
+    if (result.readmeIndex) root.readmeIndex = result.readmeIndex
+    root.setActivity("catalog", {state:result.error ? "error" : "complete"})
+    root.catalogMatchesChanged()
+    root.boardRefreshPending = true
+    root.queueBoardRefresh()
+    root.maybeSaveStartupReceipt()
+  }
+  function tryPrepareSearch() {
+    if (!root.editorOpen || !root.canBrowse || !root.indexingEnabled || root.mutationBusy
+        || root.preparingSearch || root.indexingBusy || root.searchPreparationSettled
+        || root.searchPreparationAttempted || root.catalogBusy || Date.now() < root.nextSearchPreparationAt
+        || ["refresh", "enrich"].indexOf(root.backgroundAction) >= 0) return false
+    root.searchPreparationAttempted = true
+    // A current receipt already tells us no seed check is due. Keep local
+    // indexing independent of the pack's network retry/check deadline.
+    var nextCheck = Number(root.searchPack.nextCheckAt) * 1000
+    var completedReceipt = root.searchPack.state === "ready" || root.searchPackReceiptFailed
+    if ((completedReceipt && root.searchPack.due === false && isFinite(nextCheck) && nextCheck > Date.now())
+        || Date.now() < root.searchPackRetryAt) {
+      root.searchPreparationSettled = true
+      root.indexedCatalogRevision = root.generatedAt
+      var deferredError = root.searchPackFailed
+      root.nextIndexAt = Math.max(root.nextIndexAt, Date.now() + (deferredError ? 30000 : 3000))
+      root.setActivity("documentation", {state:deferredError ? "error" : root.libraryPrepared ? "complete" : "waiting"})
+      root.maybeSaveStartupReceipt()
+      return true
+    }
+    var started = searchPreparationWorker.submit("prepare-search", {streamProgress:true, catalogEpoch:root.catalogEpoch})
+    if (started) root.setActivity("documentation", {state:"running"})
+    return started
+  }
+  function finishSearchPreparation(result, request) {
+    if (result && result.cancelled) {
+      root.searchPreparationAttempted = false
+      root.searchPreparationSettled = false
+      root.searchPreparationBusyRetries = 0
+      root.nextSearchPreparationAt = 0
+      root.setActivity("documentation", {state:root.indexingEnabled ? "waiting" : "paused"})
+      return
+    }
+    if (result && result.searchPack && result.searchPack.busy === true) {
+      if (++root.searchPreparationBusyRetries <= 3) {
+        root.searchPreparationAttempted = false
+        root.nextSearchPreparationAt = Date.now() + 3000
+        root.setActivity("documentation", {state:"waiting"})
+        return
+      }
+      result = {ok:false, error:"Documentation preparation is busy; local indexing will retry later."}
+    }
+    root.searchPreparationSettled = true
+    if (result && result.searchPack) root.searchPack = result.searchPack
+    if (result && result.ok === true && request.catalogEpoch === root.catalogEpoch) {
+      if ("catalogCount" in result) root.catalogCount = Math.max(0, Number(result.catalogCount) || 0)
+      if ("catalogSource" in result) root.catalogSource = String(result.catalogSource)
+      if ("catalogBuiltAt" in result) root.catalogBuiltAt = String(result.catalogBuiltAt || "")
+      if ("sourceDate" in result) root.sourceDate = String(result.sourceDate || "")
+      if ("fetchedAt" in result) root.fetchedAt = Number(result.fetchedAt) || 0
+      if ("generatedAt" in result) root.generatedAt = String(result.generatedAt || "")
+    }
+    if (result && result.readmeIndex) {
+      root.readmeIndex = result.readmeIndex
+      root.indexedCatalogRevision = root.generatedAt
+    }
+    var failed = !result || result.ok !== true || Boolean(result.error) || Boolean(root.searchPack.error)
+      || ["failed", "error", "unavailable"].indexOf(String(root.searchPack.state)) >= 0
+    root.searchPreparationFailed = failed
+    var retryAt = Number(root.searchPack.nextCheckAt) * 1000
+    root.searchPreparationRetryAt = failed ? Math.max(Date.now() + 300000, isFinite(retryAt) ? retryAt : 0) : 0
+    root.nextIndexAt = Date.now() + (failed ? 30000 : 3000)
+    root.setActivity("documentation", {state:failed ? "error" : root.libraryPrepared ? "complete" : "waiting"})
+    root.catalogMatchesChanged()
+    root.boardRefreshPending = true
+    root.queueBoardRefresh()
+    root.maybeSaveStartupReceipt()
+  }
+  function retryStartupLane(lane) {
+    if (lane === "inventory") return root.startInventoryCheck()
+    if (lane === "catalog") return root.refreshCatalog(false)
+    if (lane === "hardware") return root.rescan(false)
+    if (lane !== "documentation" || !root.indexingEnabled || root.preparingSearch
+        || root.indexingBusy || Date.now() < root.searchPackRetryAt) return false
+    root.searchPreparationSettled = false
+    root.searchPreparationAttempted = false
+    root.searchPreparationBusyRetries = 0
+    root.nextSearchPreparationAt = 0
+    root.nextIndexAt = 0
+    return root.tryPrepareSearch()
+  }
+  function maybeSaveStartupReceipt() {
+    if (!root.startupStarted || !root.inventoryReady || !root.canBrowse
+        || (!root.libraryPrepared && root.indexingEnabled)) return
+    if (root.startupReceipt && root.startupReceipt.catalogRevision === root.generatedAt) return
+    root.startupReceipt = {schema:1, completedAt:Date.now(), catalogRevision:root.generatedAt}
+    startupReceiptFile.setText(JSON.stringify(root.startupReceipt))
+  }
+  // Only a completion receipt, never hardware profiles or probe observations.
+  // Kept separate from preferences so older helpers cannot discard it.
+  FileView {
+    id: startupReceiptFile
+    objectName: "startupReceiptFile"
+    path: root.configRoot + "/startup.json"
+    atomicWrites: true
+    watchChanges: false
+    printErrors: false
+    onLoaded: {
+      try {
+        var raw = text()
+        if (raw.length > 4096) return
+        var receipt = JSON.parse(raw)
+        if (receipt.schema !== 1 || !(Number(receipt.completedAt) > 0)) return
+        root.startupReceipt = {schema:1, completedAt:Number(receipt.completedAt),
+          catalogRevision:String(receipt.catalogRevision || "").slice(0, 128)}
+        root.startupQuiet = true
+      } catch (error) { /* Missing or obsolete receipts do not block startup. */ }
+    }
+  }
+  Timer {
+    id: searchPreparationDelay
+    objectName: "searchPreparationDelay"
+    interval: 750
+    repeat: true
+    running: root.editorOpen && root.startupStarted && root.indexingEnabled && !root.searchPreparationSettled
+    onTriggered: root.tryPrepareSearch()
+  }
+  BackgroundWorker {
+    id: inventoryWorker
+    objectName: "inventoryJobs"
+    helperPath: root.helperPath
+    onProgress: function(event, request) { root.activityProgress("inventory", event) }
+    onFinished: function(result, request) { root.finishStartupInventory(result, request) }
+  }
+  BackgroundWorker {
+    id: catalogWorker
+    objectName: "catalogJobs"
+    helperPath: root.helperPath
+    onProgress: function(event, request) { root.activityProgress("catalog", event) }
+    onFinished: function(result, request) { root.finishCatalog(result, request) }
+  }
+  BackgroundWorker {
+    id: searchPreparationWorker
+    objectName: "searchPreparationJobs"
+    helperPath: root.helperPath
+    lowPriority: true
+    onProgress: function(event, request) { root.activityProgress("documentation", event) }
+    onFinished: function(result, request) { root.finishSearchPreparation(result, request) }
+  }
 
   BackgroundWorker {
     id: readmeIndexer
     objectName: "readmeIndexJobs"
     helperPath: root.helperPath
+    lowPriority: true
+    onProgress: function(event, request) { root.activityProgress("documentation", event) }
     onFinished: function(result, request) { root.finishIndexing(result, request) }
   }
   Timer {
     id: indexingDelay
+    objectName: "indexingDelay"
     interval: 3000
     repeat: true
     running: root.editorOpen && root.indexingEnabled
     onTriggered: root.tryIndexReadmes()
   }
   function tryIndexReadmes() {
-    if (!root.editorOpen || !root.indexingEnabled || !root.cacheLoaded || !root.hasAnalyzed
-        || root.pendingEnrichment || root.backgroundBusy || root.requestActive || root.mutationBusy
+    if (!root.editorOpen || !root.indexingEnabled || !root.cacheLoaded
+         || root.preparingSearch || !root.searchPreparationSettled
+         || root.backgroundBusy || root.requestActive || root.mutationBusy
         || root.indexingBusy || Date.now() < root.nextIndexAt || !root.catalogCount) return false
     if (root.indexedCatalogRevision === root.generatedAt && root.readmeIndex.eligible > 0
         && root.readmeIndex.due === 0 && !root.readmeIndex.pending
-        && !root.readmeIndex.failed && !root.readmeIndex.unavailable) return false
+        && !root.readmeIndex.failed) return false
     if (Number(root.readmeIndex.retryAt || 0) * 1000 > Date.now()) return false
-    return readmeIndexer.submit("index-readmes", {automatic:true})
+    var started = readmeIndexer.submit("index-readmes", {automatic:true, streamProgress:true})
+    if (started) root.setActivity("documentation", {state:"running"})
+    return started
   }
   function finishIndexing(result, request) {
-    if (!result || result.cancelled === true) return
+    if (!result || result.cancelled === true) {
+      root.setActivity("documentation", {state:root.indexingEnabled ? "waiting" : "paused"})
+      return
+    }
     if (result.ok !== true) {
       root.readmeIndexError = String(result.error || "README indexing failed. Retry when ready.")
       root.nextIndexAt = Date.now() + 300000
+      root.setActivity("documentation", {state:"error"})
       return
     }
     root.readmeIndex = result.readmeIndex || root.readmeIndex
@@ -94,6 +413,8 @@ Item {
     root.nextIndexAt = Math.max(Number(root.readmeIndex.retryAt || 0) * 1000,
       Date.now() + (root.readmeIndexError ? 300000 : root.readmeIndex.due > 0 ? 3000 : 60000))
     root.catalogMatchesChanged()
+    root.setActivity("documentation", {state:root.readmeIndexError ? "error" : root.libraryPrepared ? "complete" : "waiting"})
+    root.maybeSaveStartupReceipt()
     if (root.editorOpen && root.setupQuery && !root.queryBusy && !root.mutationBusy)
       root.quickSetup(root.setupQuery, root.setupGroup, root.setupSort, root.setupPage)
   }
@@ -101,12 +422,20 @@ Item {
     var value = JSON.parse(JSON.stringify(root.preferences))
     value.readmeIndexing = !paused
     if (!root.savePreferences(value, "indexing")) return false
-    if (paused) readmeIndexer.stop("README indexing paused.", true)
+    root.indexingPauseRequested = paused
+    if (paused) {
+      readmeIndexer.stop("README indexing paused.", true)
+      searchPreparationWorker.stop("Documentation preparation paused.", true)
+    }
     root.nextIndexAt = 0
     root.readmeIndexError = ""
     return true
   }
-  onMutationBusyChanged: if (root.mutationBusy) readmeIndexer.stop("README indexing yielded to plugin changes.", true)
+  onMutationBusyChanged: if (root.mutationBusy) {
+    readmeIndexer.stop("README indexing yielded to plugin changes.", true)
+    searchPreparationWorker.stop("Documentation preparation yielded to plugin changes.", true)
+    inventoryWorker.stop("Inventory check yielded to plugin changes.", true)
+  }
   onBackgroundBusyChanged: if (root.backgroundBusy) readmeIndexer.stop("README indexing yielded to maintenance.", true)
   onGeneratedAtChanged: { root.nextIndexAt = 0; root.catalogMatchesChanged() }
   property string readmePluginId: ""
@@ -667,9 +996,10 @@ Item {
     return request("clear-previews", {})
   }
   function retryStartup() {
-    if (!root.cacheLoaded) root.request("load", {})
-    if (!root.hasAnalyzed) root.analyze()
-    else root.rescan(false)
+    if (!root.cacheLoaded) return root.request("load", {})
+    if (!root.inventoryReady) root.startInventoryCheck()
+    if (!root.canBrowse || root.startupActivity.catalog.state === "error") root.refreshCatalog(false)
+    return root.startStartup()
   }
 
   function ensureDiscovery() {
@@ -720,16 +1050,23 @@ Item {
     id: backgroundWorker
     objectName: "backgroundJobs"
     helperPath: root.helperPath
+    onProgress: function(event, request) { root.activityProgress(
+      ["analyze", "rescan"].indexOf(request.action) >= 0 ? "hardware" : "catalog", event) }
     onFinished: function(result, request) { root.finishBackground(result, request) }
   }
 
   function backgroundRequest(action, extra) {
-    if (root.mutationBusy) return false
+    if (root.mutationBusy || (root.catalogBusy && ["refresh", "enrich"].indexOf(action) >= 0)) return false
     var values = {profile: root.profile, installed: root.installed, inventory: root.inventory,
       unavailable: root.unavailable, inventoryRevision: root.inventoryRevision,
-      scan:root.scan, previousScan:root.scan}
+      scan:root.scan, previousScan:root.scan, streamProgress:true}
     for (var key in (extra || {})) values[key] = extra[key]
     var started = backgroundWorker.submit(action, values)
+    if (started && ["refresh", "enrich"].indexOf(action) >= 0) {
+      searchPreparationWorker.stop("Documentation preparation yielded to maintenance.", true)
+      root.setActivity("catalog", {state:"running"})
+    }
+    if (started && ["analyze", "rescan"].indexOf(action) >= 0) root.setActivity("hardware", {state:"running"})
     if (started && (action !== "rescan" || values.automatic !== true)) {
       root.updateStatus = ""
       root.backgroundError = ""
@@ -739,48 +1076,62 @@ Item {
   }
 
   function finishBackground(result, request) {
-    if (result && result.cancelled === true) return
+    var scanning = request.action === "analyze" || request.action === "rescan"
+    if (result && result.cancelled === true) {
+      root.setActivity(scanning ? "hardware" : "catalog", {state:"waiting"})
+      return
+    }
     if (!result || result.ok !== true) {
       root.updateStatus = ""
       updateStatusExpiry.stop()
       root.error = String(result && result.error || "Background request failed. Retry from More actions.")
       root.backgroundError = root.error
       root.setupRefreshError = root.error
-      if (request.action === "analyze" || request.action === "rescan") root.scanError = root.error
+      if (scanning) {
+        root.scanError = root.error
+        root.setActivity("hardware", {state:"error"})
+      } else root.setActivity("catalog", {state:"error"})
       if (root.editorOpen && root.workspaceView === "discover") root.ensureDiscovery()
       return
     }
-    var scanning = request.action === "analyze" || request.action === "rescan"
-    var acceptedScan = scanning && !root.mutationBusy && Number(request.inventoryRevision) === root.inventoryRevision
-    if (acceptedScan) {
+    if (scanning) {
       root.scanError = ""
       root.profile = Array.isArray(result.profile) ? result.profile : []
       if (result.scan) root.scan = result.scan
-      root.unavailable = Array.isArray(result.unavailable) ? result.unavailable : []
-      root.inventoryReady = result.inventoryAuthoritative === true
-      if (root.inventoryReady) {
+      // Optional hardware may finish after inventory or a native mutation. Only
+      // an authoritative, current inventory snapshot may change plugin state.
+      if (!root.mutationBusy && Number(request.inventoryRevision) === root.inventoryRevision
+          && result.inventoryAuthoritative === true) {
+        root.inventoryReady = true
         root.inventory = Array.isArray(result.inventory) ? result.inventory : []
         root.installed = Array.isArray(result.installed) ? result.installed : []
+        root.unavailable = Array.isArray(result.unavailable) ? result.unavailable : []
+        root.inventoryRevision++
+        root.setActivity("inventory", {state:"complete"})
       }
       root.changes = result.changes || ({added: [], removed: []})
-      root.inventoryRevision++
       root.lastHardwareCheckAt = Date.now()
       root.hasAnalyzed = true
+      root.setActivity("hardware", {state:result.error ? "error" : "complete"})
       root.reconcilePluginOperations()
       root.reconcileTerminalOutcomes()
       root.requestContext()
       root.scheduleMatches(true)
     }
-    if ("fetchedAt" in result) root.fetchedAt = Number(result.fetchedAt) || 0
-    if ("generatedAt" in result) root.generatedAt = String(result.generatedAt || "")
-    if ("likesFetchedAt" in result) root.likesFetchedAt = Number(result.likesFetchedAt) || 0
+    if (!scanning && "fetchedAt" in result) root.fetchedAt = Number(result.fetchedAt) || 0
+    if (!scanning && "generatedAt" in result) root.generatedAt = String(result.generatedAt || "")
+    if (!scanning && "likesFetchedAt" in result) root.likesFetchedAt = Number(result.likesFetchedAt) || 0
+    if (!scanning && result.readmeIndex) root.readmeIndex = result.readmeIndex
     root.error = String(result.error || "")
     root.backgroundError = root.error
     root.setupRefreshError = root.error
     if (!scanning) root.dataWarning = String(result.dataWarning || "")
-    if (!scanning) root.catalogMatchesChanged()
+    if (!scanning) {
+      root.setActivity("catalog", {state:root.error ? "error" : "complete"})
+      root.catalogMatchesChanged()
+    }
     var completion = Presentation.completion(request.action, request.automatic,
-      Boolean(root.error) || (scanning && !acceptedScan))
+      Boolean(root.error))
     if (completion) {
       root.updateStatus = completion
       updateStatusExpiry.restart()
@@ -789,23 +1140,9 @@ Item {
       root.boardRefreshPending = true
       root.queueBoardRefresh()
     }
-    if (request.action === "analyze" && root.editorOpen) {
-      root.pendingEnrichment = true
-      enrichmentDelay.restart()
-    }
     if (root.editorOpen && root.workspaceView === "discover") root.ensureDiscovery()
   }
 
-  Timer {
-    id: enrichmentDelay
-    interval: 300
-    onTriggered: {
-      if (!root.pendingEnrichment || !root.editorOpen) return
-      if (root.mutationBusy || root.backgroundBusy) { restart(); return }
-      root.pendingEnrichment = false
-      root.backgroundRequest("enrich", {})
-    }
-  }
   property string currentQuery: ""
   property string currentCategory: ""
   property string currentInstallFilter: "all"
@@ -1258,6 +1595,7 @@ Item {
     payload.action = String(action || "")
     payload.generation = root.generation
     payload.inventoryRevision = root.inventoryRevision
+    payload.catalogEpoch = root.catalogEpoch
     root.activeGeneration = root.generation
     root.activeAction = payload.action
     root.activeRequest = payload
@@ -1421,6 +1759,7 @@ Item {
   }
 
   function refresh(query, category) {
+    if (root.catalogBusy) return false
     return root.backgroundRequest("refresh", ({
       profile: root.profile,
       installed: root.installed,
@@ -1451,7 +1790,7 @@ Item {
   }
 
   function verifyMutationState() {
-    if (!root.hasAnalyzed || root.requestActive || root.mutationActive
+    if (root.requestActive || root.mutationActive
         || root.mutationQueue.length) return false
     return request("verify-inventory", ({
       profile: root.profile,
@@ -1467,10 +1806,7 @@ Item {
     root.editorRestoreSuppressed = false
     if (root.batchRunning) return
     root.batchCloseSuppressed = false
-    if (!root.hasAnalyzed) {
-      root.analyze()
-      return
-    }
+    if (!root.startupStarted && !root.hasAnalyzed) { root.startStartup(); return }
     if (!root.editorOpen && root.preferences.watchHardware !== false) root.rescan(true)
   }
 
@@ -1568,7 +1904,7 @@ Item {
     })
     var state = InspectorState.resolve(row, root.inventoryEntry(identity), {
       inventoryReady:root.inventoryReady, operation:root.pluginOperation(identity),
-      batchRunning:root.batchRunning, batchFailure:batchFailure, selfId:"io.github.ctl0v0.omafit"
+      batchRunning:root.batchRunning, batchFailure:batchFailure, selfId:"io.github.ctl0v0.outfit"
     })
     if (!state.canOpen) return false
     var started = pluginOpenWorker.submit("open-plugin", {pluginId:identity,
@@ -2391,7 +2727,7 @@ Item {
     var identity = String(row.id || "")
     var local = inventoryEntry(identity)
     var replacement = local && Array.isArray(local.kinds) && local.kinds.indexOf("bar") >= 0
-    if (!local || identity === "io.github.ctl0v0.omafit"
+    if (!local || identity === "io.github.ctl0v0.outfit" || identity === "io.github.ctl0v0.omafit"
         || (local.canDisable !== true && !replacement) || root.effectiveEnabled(identity)
         || root.pluginPending(identity)) return false
     return startPluginAction("enable-plugin", identity, resumeState,
@@ -2402,7 +2738,7 @@ Item {
     if (!row || root.batchRunning) return false
     var identity = String(row.id || "")
     var local = inventoryEntry(identity)
-    if (!local || identity === "io.github.ctl0v0.omafit"
+    if (!local || identity === "io.github.ctl0v0.outfit" || identity === "io.github.ctl0v0.omafit"
         || local.canDisable !== true || !root.effectiveEnabled(identity)
         || root.pluginPending(identity)) return false
     return startPluginAction("disable-plugin", identity, resumeState)
@@ -2423,7 +2759,7 @@ Item {
     if (!row || root.batchRunning) return false
     var identity = String(row.id || "")
     var local = inventoryEntry(identity)
-    if (!local || identity === "io.github.ctl0v0.omafit" || local.firstParty === true
+    if (!local || identity === "io.github.ctl0v0.outfit" || identity === "io.github.ctl0v0.omafit" || local.firstParty === true
         || root.pluginPending(identity)) return false
     return startPluginAction("remove-plugin", identity, resumeState)
   }
@@ -2625,7 +2961,7 @@ Item {
     if (!root.shell || typeof root.shell.isPluginOpen !== "function" || typeof root.shell.summon !== "function") return
     // Some hosts report their queued open intent while no panel exists yet.
     // Our panel must also have reported open before treating it as restored.
-    if (root.editorOpen && root.shell.isPluginOpen("io.github.ctl0v0.omafit") === true) return
+    if (root.editorOpen && root.shell.isPluginOpen("io.github.ctl0v0.outfit") === true) return
     var payload = root.safeEditorPayload(root.editorRestorePayload, "")
     root.editorRestoreToken = "outfit-" + (++root.editorRestoreSerial)
     root.editorRestoreAckDeadline = Math.min(root.editorRestoreDeadline, Date.now() + 5000)
@@ -2633,7 +2969,7 @@ Item {
     root.editorRestoreState = "summoning"
     // An accepted summon owns one token until our panel acknowledges it or the
     // acknowledgement times out. At most one token is valid while reloading.
-    if (root.shell.summon("io.github.ctl0v0.omafit", JSON.stringify(payload)) !== true) {
+    if (root.shell.summon("io.github.ctl0v0.outfit", JSON.stringify(payload)) !== true) {
       root.editorRestoreToken = ""
       root.editorRestoreState = "armed"
       root.editorRestoreRetryAt = Date.now() + 500
@@ -2641,13 +2977,16 @@ Item {
   }
   function editorOpened() {
     root.editorOpen = true
+    root.startStartup()
     root.requestContext()
     root.scheduleMatches(true)
   }
 
   function editorClosed() {
     readmeIndexer.stop("README indexing paused while Outfit is closed.", true)
+    searchPreparationWorker.stop("Documentation preparation paused while Outfit is closed.", true)
     root.editorOpen = false
+    if (root.canBrowse && root.inventoryReady) root.startupQuiet = true
     root.thumbnailRows = []
     root.updateStatus = ""
     updateStatusExpiry.stop()
@@ -2661,13 +3000,13 @@ Item {
     if (!root.shell || typeof root.shell.summon !== "function") return false
     root.editorRestoreSuppressed = false
     var safePayload = safeEditorPayload(payload || root.editorSessionPayload, "")
-    return root.shell.summon("io.github.ctl0v0.omafit", JSON.stringify(safePayload)) === true
+    return root.shell.summon("io.github.ctl0v0.outfit", JSON.stringify(safePayload)) === true
   }
 
   function closeEditor() {
     root.userClosedEditor()
     if (!root.shell || typeof root.shell.hide !== "function") return false
-    return root.shell.hide("io.github.ctl0v0.omafit") === true
+    return root.shell.hide("io.github.ctl0v0.outfit") === true
   }
 
   function receiveOutput(raw) {
@@ -2727,7 +3066,8 @@ Item {
         root.reconciliationRequestFailed(root.error)
       return false
     }
-    if (result.readmeIndex) root.readmeIndex = result.readmeIndex
+    var currentCatalog = completedRequest.action === "load" || completedRequest.catalogEpoch === root.catalogEpoch
+    if (currentCatalog && result.readmeIndex) root.readmeIndex = result.readmeIndex
     if (["diagnostics", "clear-previews"].indexOf(completedRequest.action) >= 0) {
       root.diagnostics = result.diagnostics || ({})
       root.notice = String(result.notice || "")
@@ -2757,6 +3097,7 @@ Item {
     if (!localAcknowledgement && Array.isArray(result.unavailable)) root.unavailable = result.unavailable
     if (result.action === "verify-inventory") {
       root.inventoryReady = acceptInventory
+      root.setActivity("inventory", {state:acceptInventory ? "complete" : "error"})
       if (acceptInventory) root.inventoryRevision++
       root.notice = String(result.notice || "")
       root.error = String(result.error || "")
@@ -2834,11 +3175,22 @@ Item {
     }
     if (result.preferences && typeof result.preferences === "object")
       root.preferences = result.preferences
-    if ("catalogCount" in result)
-      root.catalogCount = Math.max(0, Number(result.catalogCount) || 0)
-    if ("fetchedAt" in result) root.fetchedAt = Math.max(0, Number(result.fetchedAt) || 0)
-    if ("generatedAt" in result) root.generatedAt = String(result.generatedAt || "")
-    if ("likesFetchedAt" in result) root.likesFetchedAt = Number(result.likesFetchedAt) || 0
+    if (currentCatalog) {
+      if ("catalogCount" in result) root.catalogCount = Math.max(0, Number(result.catalogCount) || 0)
+      if ("fetchedAt" in result) root.fetchedAt = Math.max(0, Number(result.fetchedAt) || 0)
+      if ("generatedAt" in result) root.generatedAt = String(result.generatedAt || "")
+      if ("likesFetchedAt" in result) root.likesFetchedAt = Number(result.likesFetchedAt) || 0
+    }
+    if (result.action === "load") {
+      root.catalogSource = String(result.catalogSource || (root.catalogCount ? "cache" : "none"))
+      root.catalogBuiltAt = String(result.catalogBuiltAt || "")
+      root.sourceDate = String(result.sourceDate || "")
+      if (result.searchPack) root.searchPack = result.searchPack
+      root.startupQuiet = Boolean(root.startupReceipt || root.preferences.startupReceipt)
+        || (root.catalogSource === "cache" && ["ready", "imported", "cached"].indexOf(String(root.searchPack.state)) >= 0)
+      root.setActivity("catalog", {state:root.canBrowse ? "cached" : "waiting"})
+      Qt.callLater(function() { root.startStartup() })
+    }
     var carriedSetupNotice = completedRequest.action === "quick-setup"
       ? root.setupRefreshNotice : ""
     var carriedSetupError = completedRequest.action === "quick-setup"
@@ -2906,6 +3258,8 @@ Item {
     if (completedRequest.action === "verify-inventory" && (root.timedOut || !root.response))
       root.reconciliationRequestFailed(root.error)
     root.requestActive = false
+    if (completedRequest.action === "save-preferences" && completedRequest.preferenceScope === "indexing")
+      root.indexingPauseRequested = false
     root.activeAction = ""
     root.activeRequest = ({})
     if (root.editorOpen && (root.pendingContext || root.pendingMatches || root.pendingMatchReview || root.pendingInterestPreview))
@@ -3063,7 +3417,7 @@ Item {
   }
 
   function queueBoardRefresh() {
-    if (!root.hasAnalyzed) return
+    if (!root.cacheLoaded) return
     if (root.requestActive && root.activeAction === "quick-setup"
         && root.activeRequest.boardKey === root.boardRevisionKey() && !root.pendingSetup) {
       root.boardRefreshPending = false
@@ -3372,7 +3726,6 @@ Item {
   }
   onPreferencesChanged: {
     if (!root.densityTouched) root.browseDensity = Presentation.densityName(root.preferences.browseDensity)
-    if (!root.indexingEnabled) readmeIndexer.stop("README indexing disabled.", true)
     var key = JSON.stringify(root.preferences.services || [])
     if (key === root.discoveryServicesKey) return
     root.discoveryServicesKey = key
@@ -3398,11 +3751,13 @@ Item {
 
   Component.onCompleted: {
     batchJournal.reload()
+    startupReceiptFile.reload()
     root.request("load", {})
   }
 
   IpcHandler {
-    target: "io.github.ctl0v0.omafit"
+    objectName: "serviceIpc"
+    target: "io.github.ctl0v0.outfit"
     function status(): string {
       return JSON.stringify({ demo: Boolean(root.demoRoot), opened: root.editorOpen,
         ready: root.cacheLoaded && root.hasAnalyzed && !root.queryBusy && !root.backgroundBusy
@@ -3410,7 +3765,12 @@ Item {
           && !root.hasCheckingOperations() && (!root.hostLifecycleSupported || root.hostRuntimeReady),
         view: root.workspaceView, discoveryCount: root.discoveryRows.length,
         queryBusy: root.queryBusy, backgroundBusy: root.backgroundBusy,
-        indexingBusy: root.indexingBusy, readmeIndex: root.readmeIndex,
+        canBrowse:root.canBrowse, canManagePlugins:root.canManagePlugins,
+        catalogSource:root.catalogSource, catalogBuiltAt:root.catalogBuiltAt, sourceDate:root.sourceDate,
+        catalogBusy:root.catalogBusy, inventoryBusy:root.inventoryBusy, preparingSearch:root.preparingSearch,
+        searchPack:root.searchPack, startupActivity:root.startupActivity, libraryPrepared:root.libraryPrepared,
+        searchPackFailed:root.searchPackFailed, searchPackRetryAt:root.searchPackRetryAt,
+        indexingBusy: root.indexingBusy, readmeIndex: root.readmeIndex, documentCounts:root.documentCounts,
         filtersExpanded: root.filtersExpanded, browseDensity: root.browseDensity,
         selectedPlugin: root.setupDetailId,
         densitySavePending: root.densitySavePending, densitySaveError: root.densitySaveError,
