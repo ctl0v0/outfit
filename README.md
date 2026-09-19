@@ -23,8 +23,10 @@ installed status reflect the capture session.*
   headphones, displays, or pen input can help surface relevant plugins.
 - **Add your interests.** Pick several apps, services, and features at once, or
   add your own topics, then save them together.
-- **Manage your plugins.** Review and install one plugin or a batch, turn supported
-  plugins on or off, place bar widgets, and remove third-party plugins.
+- **Batch install plugins.** Add plugins to a batch as you browse, review your
+  selections together, then confirm the batch installation and track its progress.
+- **Manage your plugins.** Install individual plugins, turn supported plugins on
+  or off, place bar widgets, and remove third-party plugins.
 
 Hardware-informed suggestions are starting points, not compatibility guarantees.
 Each plugin's detail page explains the match and links to its source and setup notes.
