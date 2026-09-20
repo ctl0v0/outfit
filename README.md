@@ -17,6 +17,9 @@ installed status reflect the capture session.*
 
 - **Browse right away.** A bundled catalog snapshot makes listings available on
   first open, while fresh listings and documentation arrive in the background.
+- **Rest when closed.** Optional background work pauses when you close Outfit.
+  After 30 seconds, its query helper and heavy view data are released; an install
+  or update you started still finishes and verifies its result.
 - **Find more than a name.** Search listing descriptions, tags, and locally indexed
   READMEs, with excerpts showing where a match came from.
 - **Explore ideas for your setup.** Recognized signals from a Framework laptop,
@@ -25,6 +28,9 @@ installed status reflect the capture session.*
   add your own topics, then save them together.
 - **Batch install plugins.** Add plugins to a batch as you browse, review your
   selections together, then confirm the batch installation and track its progress.
+- **Keep plugins up to date.** Compare installed and available versions in the
+  details page, or open **Updates** to review and update them together. Outfit's
+  own update has a separate **Update Outfit & reopen** action.
 - **Manage your plugins.** Install individual plugins, turn supported plugins on
   or off, place bar widgets, and remove third-party plugins.
 
@@ -56,7 +62,7 @@ You need **Omarchy 4.0.4 with Quattro** and Python 3.12 or newer. A normal stock
 installation is sufficient. Internet access is needed for updates and downloads;
 video playback support is optional.
 
-Outfit **0.2.0** is an early testing release. The bundled catalog lets you start
+Outfit **0.3.0** is an early testing release. The bundled catalog lets you start
 browsing while the searchable documentation library downloads in the background.
 
 ```bash
@@ -98,7 +104,9 @@ downloads a public search pack, then imports it locally; remaining eligible
 READMEs are added progressively while Outfit is open.
 
 The pack includes README text with licenses that allow redistribution.
-Search works locally as coverage grows, and typing never starts a README download.
+Search works locally as coverage grows. Separately, enabled previews can fetch
+README screenshot metadata and images for displayed listings when marketplace
+previews are missing or unavailable.
 The local search index is typically about **30 MB**; see
 [coverage and size notes](docs/TECHNICAL.md#search-library-and-current-measurements).
 
@@ -119,7 +127,9 @@ settings; pausing documentation updates keeps already cached text searchable.
 
 ## Update
 
-For an installation already using the new identity:
+In Outfit, open **⋯ More actions → Update Outfit…** to check versions and use
+**Update Outfit & reopen**. For an installation already using the new identity,
+you can also update from the terminal:
 
 ```bash
 omarchy plugin update io.github.ctl0v0.outfit
@@ -143,6 +153,7 @@ how to erase them if you want a fresh start.
   background activity, and everyday controls.
 - [Support](SUPPORT.md): troubleshooting and a small diagnostic report for issues.
 - [Technical guide](docs/TECHNICAL.md): matching, privacy, storage, limits, and development.
+- [Changelog](CHANGELOG.md): what's new in each build.
 - [Security](SECURITY.md): reporting a vulnerability. Omarchy plugins run as
   unsandboxed code inside the shell; review a plugin's source before enabling it.
 

@@ -57,7 +57,7 @@ TestCase {
     var event = {responseKind:"progress",final:false,action:job.activeRequest.action,
       generation:job.generation,sequence:1,phase:phase,message:"Untrusted probe detail"}
     for (var key in counts) event[key] = counts[key]
-    findChild(job, "backgroundParser").read(JSON.stringify(event))
+    findChild(job, "backgroundParser").read(JSON.stringify(event) + "\n")
   }
   function completeCoverage() {
     return {eligible:100,indexed:93,pending:0,failed:0,unavailable:7,due:0,

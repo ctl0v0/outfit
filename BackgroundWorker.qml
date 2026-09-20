@@ -78,6 +78,7 @@ Item {
     exitCode = 0
     outputBytes = 0
     outputLines = 0
+    outputParser.reset()
     progressSequence = 0
     active = true
     worker.stdinEnabled = true
@@ -113,7 +114,9 @@ Item {
     }
     active = false
     activeRequest = ({})
+    response = null
     finished(result, request)
+    if (!active) outputParser.reset()
   }
 
   Timer {
@@ -126,11 +129,21 @@ Item {
     id: deadline
     objectName: "backgroundDeadline"
     interval: root.activeRequest.action === "prepare-search" ? 180000
-      : ["enrich", "refresh", "index-readmes", "catalog-refresh"].indexOf(root.activeRequest.action) >= 0 ? 90000 : 45000
+      : ["enrich", "refresh", "index-readmes", "catalog-refresh", "check-updates", "self-update"].indexOf(root.activeRequest.action) >= 0 ? 90000 : 45000
     onTriggered: root.stop("Background work timed out. Cached results remain available; retry the action.")
   }
   Timer { id: killDeadline; interval: 2000; onTriggered: if (worker.processId > 0) worker.signal(9) }
-  Timer { id: drain; objectName: "backgroundDrain"; interval: 100; onTriggered: { root.received = true; root.finish() } }
+  Timer {
+    id: drain
+    objectName: "backgroundDrain"
+    interval: 100
+    onTriggered: {
+      var owner = root.generation
+      outputParser.flush()
+      // EOF can finish this request; its callback may already submit the next.
+      if (root.active && root.generation === owner) { root.received = true; root.finish() }
+    }
+  }
   Process {
     id: worker
     objectName: "backgroundWorker"
@@ -145,9 +158,15 @@ Item {
       stdinEnabled = false
       deadline.restart()
     }
-    stdout: SplitParser {
+    stdout: BoundedJsonParser {
+      id: outputParser
       objectName: "backgroundParser"
-      onRead: function(line) { root.receiveLine(line) }
+      accepting: root.active && !root.failure
+      maxFrameBytes: root.maxLineBytes
+      maxStreamBytes: root.maxOutputBytes
+      maxFrames: root.maxOutputLines
+      onFrame: function(line) { root.receiveLine(line) }
+      onFailed: function(message) { root.stop(message) }
     }
     onExited: function(code) {
       root.exitCode = code

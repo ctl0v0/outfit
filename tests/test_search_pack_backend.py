@@ -108,6 +108,63 @@ class SearchPackBackendTests(unittest.TestCase):
         self.assertTrue(all(e["generation"] == 17 and e["action"] == "prepare-search"
                             and e["responseKind"] == "progress" and e["final"] is False for e in events))
 
+    def test_unchanged_asset_skips_download_only_with_current_catalog_coverage(self):
+        records = [self.record(self.items[0]), self.record(self.items[1])]
+        app.save_catalog(self.store, self.items[:1], self.generated, 100)
+        first, fetch = self.prepare(records)
+        self.assertEqual(fetch.call_count, 2)
+        self.now += 86401
+        second, fetch = self.prepare(records)
+        self.assertEqual(second["searchPack"]["state"], "ready")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(second["searchPack"]["importedAt"], first["searchPack"]["importedAt"])
+        # Identical release, newly relevant key: must re-read the asset that was
+        # intentionally filtered against the earlier catalog.
+        app.save_catalog(self.store, self.items[:2], self.generated, 200)
+        self.now += 86401
+        result, fetch = self.prepare(records)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(result["searchPack"]["state"], "ready")
+        self.assertTrue(self.bodies()[app.readme_key(self.items[1])])
+
+    def test_pruning_removes_pack_attribution_and_invalidates_coverage(self):
+        self.prepare([self.record(self.items[0]), self.record(self.items[1])])
+        with app.ReadmeIndex(self.store, create=True) as index:
+            index.sync(self.items[1:], {}, self.now)
+            keys = {row[0] for row in index.db.execute("SELECT key FROM search_pack_sources")}
+            self.assertNotIn(app.readme_key(self.items[0]), keys)
+            self.assertIn(app.readme_key(self.items[1]), keys)
+        # Catalog is still the original set, but a seed document was pruned.
+        # The same asset must restore it instead of trusting an old receipt.
+        self.now += 86401
+        result, fetch = self.prepare([self.record(self.items[0]), self.record(self.items[1])])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(result["searchPack"]["state"], "ready")
+        self.assertTrue(self.bodies()[app.readme_key(self.items[0])])
+
+    def test_matching_asset_digest_does_not_bypass_changed_manifest_validation(self):
+        self.prepare()
+        self.now += 86401
+        result, fetch = self.prepare(changes={"docCount": 2, "candidateCount": 2,
+            "stateCounts": {"indexed": 2}, "reasonCounts": {self.record()["reason"]: 2}})
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(result["searchPack"]["state"], "error")
+
+    def test_pack_validation_does_not_hold_general_cache_lock(self):
+        other = app.Store(self.store.base)
+        self.addCleanup(other.close)
+        original = app.pack_records
+
+        def records(*args):
+            for record in original(*args):
+                with other.scoped_lock():
+                    pass
+                yield record
+
+        with mock.patch.object(app, "pack_records", side_effect=records):
+            result, _ = self.prepare()
+        self.assertEqual(result["searchPack"]["state"], "ready")
+
     def test_bad_manifests_are_rejected_before_asset_download(self):
         bad = [{"version": 2}, {"schemaVersion": 2}, {"schemaVersion": True}, {"version": "20260919T000000Z"},
                {"dataVersion": 999}, {"format": "sqlite"}, {"generatedAt": ""},

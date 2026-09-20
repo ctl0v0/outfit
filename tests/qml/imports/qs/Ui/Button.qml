@@ -6,6 +6,7 @@ C.Button {
   property color foreground: "white"
   property color accent: "lightblue"
   property bool bordered: false
+  property real radius: Style.cornerRadius
   property bool focusable: false
   property bool selected: false
   readonly property bool hot: hovered

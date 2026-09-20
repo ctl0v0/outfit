@@ -6,6 +6,24 @@ toolbox widget or optional Apps launcher.
 
 ## First open and background activity
 
+### Resource use and sleep
+
+Closing Outfit pauses optional hardware, catalog, documentation, preview, and
+update-check work. Reopening within 30 seconds keeps the warm session. After
+30 seconds closed, Outfit releases its Python query helper and heavy view data;
+reopening loads cached data and resumes the needed checks. Saved settings,
+interest/settings drafts, filters, density, and navigation context are retained.
+
+An install, update, explicit save, or result-verification operation you started
+finishes safely before sleep. The small shell-hosted service and bar widget remain
+available to reopen Outfit. There is no continual closed-window hardware polling
+or catalog scanning.
+
+The Updates table creates only visible rows and a small reuse buffer. Scrolling
+coalesces preview demand and position snapshots, and each Browse card creates only
+its selected layout. Failed preview downloads back off rather than repeatedly
+retrying the same URL; **Clear preview cache** resets that backoff.
+
 **Browse** is the starting workspace. A bundled public catalog snapshot is ready
 on first open, even before a network refresh. Later opens can use cached listings.
 Outfit checks installed plugins first; once inventory is confirmed, plugin
@@ -35,8 +53,9 @@ work is retained for the next open.
 ## Browse, filter, and search
 
 Type a plugin name, task, app, or feature. Search combines listing metadata with
-available current-revision README text on your computer. Typing does not request
-README downloads. Search excerpts replace card descriptions while you search;
+available current-revision README text on your computer. Search queries do not
+download documents; the separate preview loader may fetch README screenshot
+metadata and images for displayed results. Search excerpts replace card descriptions while you search;
 **README match** identifies evidence found in documentation.
 
 - Starting a search selects **Best match**. Choose another sort to keep it while
@@ -66,10 +85,21 @@ restarts; switching views keeps the selection, filters, and scroll context where
 possible. Smaller views tighten spacing and previews while retaining text sizes.
 Disabling thumbnails removes the image column in List view.
 
+Browse cards prefer the marketplace preview. If it is missing or cannot be
+downloaded, Outfit can use a suitable screenshot from the plugin's README at the
+catalog's pinned revision. This fallback requires both thumbnails and GitHub
+README enrichment to be enabled. Logos, badges and branding banners are skipped;
+only approved image sources are fetched, and results are cached locally.
+**Loading preview…**, **Preview unavailable**, and **No preview available**
+distinguish pending work, a failed load, and a listing with no suitable image.
+
 Likes, GitHub stars, views, and command copies are public marketplace/repository
 counts. A dash means unknown, while zero means a reported zero. Copies count
 install-command copies, not confirmed installations; likes are anonymous reactions,
 not unique-user ratings. Hover or select a metric for its explanation.
+
+**Next** and **Previous** return to the top of the result list when the new page
+loads. Returning from a plugin's details keeps your previous reading position.
 
 **Verified** reflects the marketplace's status, not a security certification.
 **New** uses the marketplace's rolling twelve-hour added window. The detail page
@@ -173,10 +203,70 @@ group. Full uninterrupted window continuity requires host-side support; see the
 
 ## Settings and maintenance
 
+### Plugin updates
+
+The header's **Updates (N)** button opens the installed-plugin update list.
+Available updates appear first; Outfit's own update appears separately. The count
+is independent of Browse searches and filters. **Update all (N)** counts eligible
+ordinary plugins only, excluding Outfit and entries requiring manual attention.
+
+The list is a compact table with **Plugin**, **Installed**, **Upstream**, **Status**,
+and **Actions** columns. Expand **+** at the start of a row for its full explanation;
+**Details** opens the plugin page. Column headings stay visible while scrolling.
+Narrow windows and larger fonts allow horizontal scrolling, and keyboard focus
+brings off-screen row actions into view.
+
+Outfit checks in the background while open and reuses successful checks for six
+hours. **Check for updates** forces a fresh check. A network failure is shown as
+unavailable, not up to date; automatic retries back off for five minutes.
+
+Installed-plugin details show the **Installed** version and revision separately
+from the **Available** upstream version and revision in a **Version** section just
+above **Why recommended**. **Check for updates** lives with the other **On your
+computer** controls. Updates follow the actual
+installed repository's default-branch HEAD, as the native Omarchy updater does,
+rather than the potentially older marketplace snapshot. **New changes** means
+the source changed without a version-number change.
+
+Use **Update**, or review **Update all**, to confirm version transitions. Updates
+run sequentially with per-plugin progress, stop-after-current, and recovery after
+interruption. Enabled/disabled state and widget placement are retained and
+verified. Your pending batch-install selections are preserved. After a changed
+remote target or failed verification, check again and review the current update.
+
+**Locally customized** means a plugin has local edits or added files. Outfit can
+still show its **Installed** and **Upstream** versions, but leaves it out of
+automatic updates and Update all. An upstream version can be older than your
+customized local version; it is informational, not a proposed downgrade. Your
+files are left intact. Unsupported installation sources are labeled **Manual
+update**. Actual network/check failures are reported per plugin with a quiet
+count, without making successful checks look like errors.
+
+Automatic management supports clean, ordinary Git installations with public
+GitHub HTTPS origins and verifiable fast-forward history. Local changes,
+development links, non-Git installs, unsupported sources, and divergent history
+show explanatory states instead of being overwritten. First-party plugins update
+through Omarchy itself. The native updater uses the standard
+`~/.config/omarchy/plugins` location.
+
+Open **More actions (⋯) → Update Outfit…** to check Outfit's installed and
+available versions. **Update Outfit & reopen** is separate from Update all.
+The large Outfit card in the Updates list is currently hidden. Save or discard any
+settings/interests drafts first. An independent user-systemd worker updates and
+verifies Outfit, restarts the shell, and reopens the previous view. If updating
+fails or the remote revision changes during execution, it reports the outcome
+without automatically restarting. Development-linked Outfit installations must
+be updated from their source checkout.
+
+Like installs, ordinary updates can briefly close Outfit on stock Omarchy while
+plugin surfaces reload. Update checks themselves never change installed files.
+
+### Preferences and maintenance actions
+
 The top-right cog opens Settings; **Back** returns, and the corner **×** closes
 Outfit. Settings include:
 
-- Optional local hardware checks every 60 seconds, including a check when
+- Optional local hardware checks every 60 seconds while Outfit is open, including a check when
   reopening a session whose last scan is at least a minute old.
 - **Use GitHub READMEs and previews**, which controls README enrichment and
   README search. Turning it off also removes cached README matches from search.

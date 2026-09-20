@@ -47,6 +47,7 @@ TestCase {
     compare(page.pluginRow.readmeLoading, true, "Queued README requests show the loading state too")
     var blocks = [{kind:"heading",level:1,inlines:[{kind:"text",text:"Pinned heading"}]}]
     var request = {action:"readme-plugin",pluginId:"example.reading",generation:12,
+      readmeIdentity:service.requestedReadmeIdentity,
       inventoryRevision:service.inventoryRevision - (data.stale ? 1 : 0)}
     verify(service.applyResponse({ok:true,action:"readme-plugin",generation:12,readmePluginId:"example.reading",
       readmeContent:"Plain fallback",readmeBlocks:blocks,readmeMedia:[],readmeMediaIndexed:true}, request))
@@ -82,6 +83,24 @@ TestCase {
     compare(page.pluginRow.readmeText, "")
     compare(page.pluginRow.readmeBlocks.length, 0)
     compare(walk(page, "readmeFallback").text, "README enrichment is disabled in settings.")
+    view.close()
+  }
+  function test_same_plugin_new_revision_does_not_reuse_or_accept_old_document() {
+    var view = make(true), service = view.service
+    var oldKey = service.requestedReadmeIdentity
+    service.readmePluginId = "example.reading"
+    service.readmeIdentity = oldKey
+    service.readmeContent = "Old revision"
+    service.readmeBlocks = [{kind:"paragraph",text:"Old revision"}]
+    service.readmeMediaIndexed = true
+    var next = Object.assign({},service.setupRows[0],{listingCommit:"b".repeat(40)})
+    service.loadReadme(next)
+    verify(service.requestedReadmeIdentity !== oldKey)
+    compare(service.readmePluginId,"")
+    compare(service.readmeBlocks.length,0)
+    verify(service.applyResponse({ok:true,action:"readme-plugin",generation:99,readmePluginId:"example.reading",readmeContent:"Old revision"},
+      {action:"readme-plugin",generation:99,pluginId:"example.reading",readmeIdentity:oldKey}))
+    compare(service.readmeContent,"")
     view.close()
   }
 }

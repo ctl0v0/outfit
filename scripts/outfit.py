@@ -13,6 +13,7 @@ import functools
 import gzip
 import hashlib
 import html
+import importlib.util
 import io
 import json
 import math
@@ -26,7 +27,9 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
+import types
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -102,6 +105,13 @@ THUMBNAIL_FILENAME = re.compile(r"thumb-[0-9a-f]{32}-[0-9a-f]{16}\.(?:png|jpg|we
 MAX_THUMBNAIL_BATCH = 12
 MAX_THUMBNAIL_FILES = 256
 MAX_THUMBNAIL_CACHE_BYTES = 64 * 1024 * 1024
+UPDATES_MAX_AGE = 6 * 60 * 60
+UPDATES_RETRY_AGE = 5 * 60
+MAX_UPDATE_HEAD_BYTES = 4096
+MAX_UPDATES_CACHE_BYTES = 4 * 1024 * 1024
+MAX_UPDATE_MANIFEST_BYTES = 128 * 1024
+UPDATES_WORKERS = 4
+UPDATES_TIMEOUT = 60
 
 SETUP_GROUPS = (
     ("desktop-navigation", "Desktop & Navigation"),
@@ -1681,7 +1691,7 @@ def readme_document(source: str, item: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
-def fetch_readme(item: dict[str, Any]) -> dict[str, Any]:
+def fetch_readme(item: dict[str, Any], timeout: float = 10) -> dict[str, Any]:
     commit = item.get("listingCommit", "")
     if not commit:
         return {"ok": False, "text": "", "content": "", "summary": "", "media": []}
@@ -1689,7 +1699,7 @@ def fetch_readme(item: dict[str, Any]) -> dict[str, Any]:
     repository = urllib.parse.quote(item["repoName"], safe="")
     url = f"https://raw.githubusercontent.com/{owner}/{repository}/{commit}/README.md"
     try:
-        body = fetch_bytes(url, "raw.githubusercontent.com", MAX_README_BYTES, 10)
+        body = fetch_bytes(url, "raw.githubusercontent.com", MAX_README_BYTES, min(10, timeout))
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError):
         return {"ok": False, "text": "", "content": "", "summary": "", "media": []}
     source = body.decode("utf-8", errors="replace")
@@ -1750,7 +1760,7 @@ def image_dimensions(data: bytes) -> tuple[str, int, int] | None:
     return None
 
 
-def fetch_preview_image(url: str) -> tuple[bytes, str]:
+def fetch_preview_image(url: str, timeout: float = 10) -> tuple[bytes, str]:
     trusted = _trusted_cached_media_url(url, "image") or marketplace_image_url(url)
     if not trusted:
         raise ValueError("Preview image URL is not approved.")
@@ -1761,8 +1771,9 @@ def fetch_preview_image(url: str) -> tuple[bytes, str]:
         headers={"User-Agent": "Outfit/0.1", "Accept": "image/png,image/jpeg,image/webp,image/gif"},
     )
     opener = urllib.request.build_opener(RestrictedMediaRedirect(host))
-    deadline = time.monotonic() + 10
-    with opener.open(request, timeout=10) as response:
+    timeout = max(0.1, min(10, timeout))
+    deadline = time.monotonic() + timeout
+    with opener.open(request, timeout=timeout) as response:
         data = read_bounded_response(response, MAX_PREVIEW_IMAGE_BYTES, deadline)
     extension = validate_preview_image(data, thumbnail=host == "plugins.omarchy.org")
     return data, extension
@@ -1800,51 +1811,209 @@ def prune_thumbnails(store: Store, protected: set[str]) -> None:
         total -= size
 
 
-def materialize_thumbnails(store: Store, items: list[dict[str, Any]], revision: str) -> dict[str, Any]:
-    def load(item: dict[str, Any]) -> tuple[str, dict[str, str]]:
-        url = marketplace_image_url(item.get("previewThumbnail")) \
-            or marketplace_image_url(item.get("previewImage"))
-        if not url:
-            return item["id"], {"url": "", "localSource": ""}
+def thumbnail_readme_cache(store: Store) -> dict[str, Any]:
+    try:
+        raw = store.read("thumbnail-readmes.json", 2 * 1024 * 1024, {})
+        if not isinstance(raw, dict) or raw.get("schema") != 1 or not isinstance(raw.get("entries"), dict):
+            return {}
+        output = {}
+        for key, entry in list(raw["entries"].items())[:256]:
+            if not re.fullmatch(r"[0-9a-f]{64}", key) or not isinstance(entry, dict):
+                continue
+            checked = entry.get("checkedAt")
+            urls = entry.get("urls")
+            if (type(checked) not in (float, int) or not math.isfinite(checked) or checked < 0
+                    or type(entry.get("ok")) is not bool or not isinstance(urls, list)):
+                continue
+            output[key] = {"checkedAt": checked, "ok": entry["ok"],
+                           "urls": [url for value in urls[:3]
+                                    if (url := _trusted_cached_media_url(value, "image"))]}
+        return output
+    except (OSError, ValueError):
+        return {}
+
+
+def thumbnail_screenshots(media: Any, item: dict[str, Any]) -> list[str]:
+    """Use the existing README media resolver, excluding decorative artwork."""
+    images = []
+    for entry in validate_readme_media(media):
+        if entry["kind"] != "image":
+            continue
+        words = (entry["url"] + " " + entry["label"]).lower()
+        if re.search(r"(?:^|[^a-z0-9])(?:badge|shield|logo|icon|banner|brand|mark|sponsor)(?:[^a-z0-9]|$)", words):
+            continue
+        resolved = _readme_media_url(entry["url"], item, "image")
+        if resolved and resolved[0] == "image":
+            images.append(resolved[1])
+    return list(dict.fromkeys(images))[:3]
+
+
+def thumbnail_failures(store: Store) -> dict[str, Any]:
+    """Bounded URL/revision transport backoff, independent of README discovery."""
+    try:
+        raw = store.read("thumbnail-failures.json", 128 * 1024, {})
+        if not isinstance(raw, dict) or raw.get("schema") != 1 or not isinstance(raw.get("entries"), dict):
+            return {}
+        return {key: entry for key, entry in list(raw["entries"].items())[:512]
+                if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key)
+                and isinstance(entry, dict) and type(entry.get("failures")) is int
+                and 1 <= entry["failures"] <= 10
+                and type(entry.get("checkedAt")) in (int, float)
+                and math.isfinite(entry["checkedAt"]) and 0 <= entry["checkedAt"] <= 253402300799}
+    except (OSError, ValueError):
+        return {}
+
+
+def materialize_thumbnails(store: Store, items: list[dict[str, Any]], revision: str,
+                           allow_readme: bool = False) -> dict[str, Any]:
+    deadline = time.monotonic() + 32
+    now = time.time()
+    preview_generation = store.stamp("preview-generation.json")
+    metadata = thumbnail_readme_cache(store) if allow_readme else {}
+    metadata_updates: dict[str, Any] = {}
+    failures = thumbnail_failures(store)
+    failure_updates: dict[str, Any] = {}
+    readmes = None
+    readmes_lock = threading.Lock()
+    # os.listdir(fd) duplicates a descriptor with a shared directory offset.
+    # Concurrent worker enumerations can miss cached files; snapshot once.
+    thumbnail_files = []
+    for name in os.listdir(store.fd):
+        if THUMBNAIL_FILENAME.fullmatch(name):
+            try:
+                thumbnail_files.append((name, os.stat(name, dir_fd=store.fd, follow_symlinks=False).st_mtime))
+            except FileNotFoundError:
+                pass
+    thumbnail_files.sort(key=lambda entry: entry[1], reverse=True)
+
+    def inspector_document(identity: str) -> dict[str, Any]:
+        nonlocal readmes
+        with readmes_lock:
+            if readmes is None:
+                try:
+                    readmes = load_readmes(store)
+                except (OSError, ValueError):
+                    readmes = {}
+            return readmes.get(identity, {})
+
+    def image_file(url: str, image_revision: str) -> str:
+        failure_key = hashlib.sha256(json.dumps([url, image_revision]).encode()).hexdigest()
         prefix = "thumb-" + hashlib.sha256(url.encode()).hexdigest()[:32] + "-"
-        key = prefix + hashlib.sha256(revision.encode()).hexdigest()[:16]
-        candidates = sorted(
-            (name for name in os.listdir(store.fd)
-             if name.startswith(prefix) and THUMBNAIL_FILENAME.fullmatch(name)),
-            key=lambda name: os.stat(name, dir_fd=store.fd, follow_symlinks=False).st_mtime,
-            reverse=True,
-        )
+        key = prefix + hashlib.sha256(image_revision.encode()).hexdigest()[:16]
+        candidates = [name for name, _mtime in thumbnail_files if name.startswith(prefix)]
         fallback = ""
         for name in candidates:
             try:
                 store.read_thumbnail(name)
                 if name.startswith(key + "."):
                     os.utime(name, None, dir_fd=store.fd, follow_symlinks=False)
-                    return item["id"], {"url": url, "localSource": (store.base / name).as_uri()}
+                    return (store.base / name).as_uri()
                 fallback = fallback or (store.base / name).as_uri()
             except (OSError, ValueError):
                 continue
+        failure = failures.get(failure_key, {})
+        if failure and 0 <= now - failure["checkedAt"] < min(86400, 300 * 2 ** (failure["failures"] - 1)):
+            return fallback
         try:
-            data, extension = fetch_preview_image(url)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return fallback
+            data, extension = fetch_preview_image(url, timeout=remaining) if allow_readme else fetch_preview_image(url)
             local = store.write_blob(key + "." + extension, data, MAX_PREVIEW_IMAGE_BYTES)
+            failure_updates[failure_key] = None
         except (OSError, ValueError, urllib.error.URLError):
+            failure_updates[failure_key] = {"checkedAt": now, "failures": min(10, failure.get("failures", 0) + 1)}
             local = fallback
-        return item["id"], {"url": url, "localSource": local}
+        return local
+
+    def load(item: dict[str, Any]) -> tuple[str, dict[str, str]]:
+        original = marketplace_image_url(item.get("previewThumbnail")) or marketplace_image_url(item.get("previewImage"))
+        result = {"url": original, "localSource": "", "source": "", "state": "missing"}
+        if original:
+            local = image_file(original, revision)
+            if local:
+                return item["id"], {**result, "localSource": local, "source": "marketplace", "state": "ready"}
+            result["state"] = "failed"
+        document_key = readme_key(item)
+        if not allow_readme or not document_key:
+            return item["id"], result
+        if time.monotonic() >= deadline:
+            return item["id"], {**result, "state": "deferred"}
+        cached = metadata.get(document_key)
+        if cached and 0 <= now - cached["checkedAt"] < (86400 if cached["ok"] else 300):
+            urls = cached["urls"]
+            found = cached["ok"]
+        else:
+            document = inspector_document(item["id"])
+            if (document.get("commit") == item.get("listingCommit")
+                    and document.get("contentVersion") == README_CONTENT_VERSION
+                    and document.get("media")):
+                media, found = document["media"], True
+            else:
+                document = fetch_readme(item, timeout=max(0.1, min(10, deadline - time.monotonic())))
+                media, found = document.get("media", []), document.get("ok") is True
+            if not found and time.monotonic() >= deadline:
+                return item["id"], {**result, "state": "deferred"}
+            urls = thumbnail_screenshots(media, item)
+            metadata_updates[document_key] = {"urls": urls, "ok": found, "checkedAt": now}
+        for url in urls:
+            # Revalidate persisted candidates against this repository/revision.
+            resolved = _readme_media_url(url, item, "image")
+            if not resolved or resolved[0] != "image":
+                continue
+            local = image_file(resolved[1], document_key)
+            if local:
+                return item["id"], {**result, "localSource": local, "source": "readme", "state": "ready",
+                                     "repo": item["repo"], "listingCommit": item["listingCommit"]}
+            if time.monotonic() >= deadline:
+                return item["id"], {**result, "state": "deferred"}
+        if not found or urls:
+            result["state"] = "failed"
+        return item["id"], result
 
     output = {}
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in items[:MAX_THUMBNAIL_BATCH]:
         url = marketplace_image_url(item.get("previewThumbnail")) or marketplace_image_url(item.get("previewImage"))
-        grouped.setdefault(url, []).append(item)
+        # An empty marketplace URL must never combine unrelated repositories.
+        group = url if url and not allow_readme else url + "|" + readme_key(item)
+        grouped.setdefault(group, []).append(item)
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(load, group[0]): group for group in grouped.values()}
         for future in concurrent.futures.as_completed(futures):
             try:
                 _identity, result = future.result()
             except Exception:
-                result = {"url": "", "localSource": ""}
+                item = futures[future][0]
+                result = {"url": marketplace_image_url(item.get("previewThumbnail")) or marketplace_image_url(item.get("previewImage")),
+                          "localSource": "", "source": "", "state": "failed"}
             for item in futures[future]:
                 output[item["id"]] = dict(result)
+    if metadata_updates:
+        with store.scoped_lock():
+            if store.stamp("preview-generation.json") == preview_generation:
+                entries = thumbnail_readme_cache(store)
+                previous = dict(entries)
+                for key, entry in metadata_updates.items():
+                    if entries.get(key, {}).get("checkedAt", 0) <= entry["checkedAt"]:
+                        entries[key] = entry
+                retained = dict(sorted(entries.items(), key=lambda pair: pair[1]["checkedAt"], reverse=True)[:256])
+                if retained != previous:
+                    store.write("thumbnail-readmes.json", {"schema": 1, "entries": retained}, 2 * 1024 * 1024)
+    if failure_updates:
+        with store.scoped_lock():
+            entries = thumbnail_failures(store)
+            previous = dict(entries)
+            for key, entry in failure_updates.items():
+                if entries.get(key, {}).get("checkedAt", 0) > now:
+                    continue
+                if entry is None:
+                    entries.pop(key, None)
+                else:
+                    entries[key] = entry
+            entries = dict(sorted(entries.items(), key=lambda pair: pair[1]["checkedAt"], reverse=True)[:512])
+            if entries != previous and store.stamp("preview-generation.json") == preview_generation:
+                store.write("thumbnail-failures.json", {"schema": 1, "entries": entries}, 128 * 1024)
     protected = {Path(urllib.parse.urlsplit(item["localSource"]).path).name
                  for item in output.values() if item["localSource"]}
     prune_thumbnails(store, protected)
@@ -1919,6 +2088,25 @@ def _terminate_all(_signum: int | None = None, _frame: Any = None) -> None:
         raise SystemExit(128 + _signum)
 
 
+def _wait_command(process: subprocess.Popen[bytes], deadline: float) -> None:
+    """Observe exit without reaping a failed group leader before cleanup.
+
+    Descendants may close stdout and outlive a failed parent. WNOWAIT keeps its
+    identity pinned so the exceptional path can safely signal the entire group.
+    """
+    while True:
+        status = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if status is not None:
+            if status.si_code != os.CLD_EXITED or status.si_status != 0:
+                raise ValueError("Probe was unavailable.")
+            process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Probe timed out.")
+        time.sleep(min(0.01, remaining))
+
+
 def command_launch(argv: list[str]) -> tuple[list[str], dict[str, str]]:
     """Resolve fixed native commands against the trusted session runtime.
 
@@ -1961,6 +2149,21 @@ def command_launch(argv: list[str]) -> tuple[list[str], dict[str, str]]:
         environment.pop("OMARCHY_PATH", None)
     # Plugin rescans can exceed omarchy-shell's interactive two-second IPC limit.
     environment["OMARCHY_SHELL_IPC_TIMEOUT"] = "30s"
+    if argv[:3] == [COMMANDS["omarchy"], "plugin", "update"]:
+        # These settings also apply to Git subprocesses launched by the native
+        # updater. Never invoke credential helpers, askpass, hooks or submodules.
+        environment.update(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false",
+                           SSH_ASKPASS="/bin/false", GIT_CONFIG_NOSYSTEM="1",
+                           GIT_CONFIG_GLOBAL="/dev/null")
+        settings = {"credential.helper": "", "core.askPass": "/bin/false",
+                    "core.hooksPath": "/dev/null", "core.fsmonitor": "false",
+                    "protocol.allow": "never", "protocol.https.allow": "always",
+                    "http.followRedirects": "false", "fetch.recurseSubmodules": "false",
+                    "submodule.recurse": "false"}
+        environment["GIT_CONFIG_COUNT"] = str(len(settings))
+        for index, (key, value) in enumerate(settings.items()):
+            environment[f"GIT_CONFIG_KEY_{index}"] = key
+            environment[f"GIT_CONFIG_VALUE_{index}"] = value
     return effective, environment
 
 
@@ -1978,10 +2181,11 @@ def run_command(argv: list[str], timeout: float, maximum: int) -> bytes:
     chunks: list[bytes] = []
     total = 0
     deadline = time.monotonic() + timeout
-    selector = selectors.DefaultSelector()
-    assert process.stdout is not None
-    selector.register(process.stdout, selectors.EVENT_READ)
+    selector = None
     try:
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None
+        selector.register(process.stdout, selectors.EVENT_READ)
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1996,17 +2200,23 @@ def run_command(argv: list[str], timeout: float, maximum: int) -> bytes:
                 total += len(chunk)
                 if total > maximum:
                     raise ValueError("Probe output exceeded its limit.")
-        code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
-        if code != 0:
-            raise ValueError("Probe was unavailable.")
+        _wait_command(process, deadline)
         return b"".join(chunks)
-    except (TimeoutError, subprocess.TimeoutExpired, ValueError):
+    except BaseException as error:
         _terminate_process(process)
+        if isinstance(error, subprocess.TimeoutExpired):
+            raise TimeoutError("Probe timed out.") from None
         raise
     finally:
-        selector.close()
-        process.stdout.close()
-        _children.discard(process)
+        try:
+            if selector is not None:
+                selector.close()
+        finally:
+            try:
+                if process.stdout is not None:
+                    process.stdout.close()
+            finally:
+                _children.discard(process)
 
 
 def run_activation_command(argv: list[str], observed: dict[str, Any] | None = None) -> bytes:
@@ -2020,7 +2230,7 @@ def run_activation_command(argv: list[str], observed: dict[str, Any] | None = No
             return run_command(argv, 35, 32 * 1024)
         except (OSError, TimeoutError, ValueError) as command_error:
             last_error = command_error
-            inventory, unavailable = scan_inventory()
+            inventory, unavailable = scan_inventory(include_versions=False)
             if not unavailable and mutation_observed("enable-plugin", desired, identity, inventory):
                 return b""
             target = next((item for item in inventory if item["id"] == identity), None)
@@ -2525,6 +2735,8 @@ def validate_inventory(value: Any) -> list[dict[str, Any]]:
             "active": raw.get("active") is True,
             "canDisable": raw.get("canDisable") is True,
             "firstParty": raw.get("firstParty") is True,
+            "installedVersion": one_line(raw.get("installedVersion", raw.get("version")), 64),
+            "installedRevision": full_sha(raw.get("installedRevision")),
             "barSection": raw.get("barSection")
                 if raw.get("barSection") in {"left", "center", "right"} else "",
             "barSectionKnown": raw.get("barSectionKnown") is not False,
@@ -2547,6 +2759,8 @@ def merge_inventory(items: list[dict[str, Any]], inventory: list[dict[str, Any]]
             row["canDisable"] = local_item["canDisable"]
             row["kinds"] = local_item["kinds"]
             row["barSection"] = local_item["barSection"]
+            row["installedVersion"] = local_item.get("installedVersion", "")
+            row["installedRevision"] = local_item.get("installedRevision", "")
         merged.append(row)
     for identity in sorted(local.keys() - catalog_ids):
         local_item = local[identity]
@@ -2558,7 +2772,9 @@ def merge_inventory(items: list[dict[str, Any]], inventory: list[dict[str, Any]]
             "description": "Built into Omarchy." if first_party else "Installed locally; no marketplace listing is cached.",
             "installNote": "",
             "author": "Omarchy" if first_party else "",
-            "version": "",
+            "version": local_item.get("installedVersion", ""),
+            "installedVersion": local_item.get("installedVersion", ""),
+            "installedRevision": local_item.get("installedRevision", ""),
             "category": "First party" if first_party else "Installed",
             "tags": kinds,
             "kind": ", ".join(kinds[:3]),
@@ -2610,19 +2826,29 @@ def scan_bar_sections() -> dict[str, str] | None:
     return sections
 
 
-def scan_inventory() -> tuple[list[dict[str, Any]], bool]:
+def scan_inventory(include_versions: bool = True) -> tuple[list[dict[str, Any]], bool]:
+    """Fresh host presence/state/placement; optional display-only disk enrichment.
+
+    Update safety always uses inspect_update_target on the selected target.
+    The default retains the complete inventory contract for ordinary UI loads.
+    """
     try:
         plugins = safe_json_loads(
             run_command([COMMANDS["omarchy"], "plugin", "list", "--json"], 5, 2 * 1024 * 1024),
             "Plugin inventory",
         )
-        if not isinstance(plugins, list) or any(not isinstance(item, dict) or not plugin_id(item.get("id")) for item in plugins):
+        if (not isinstance(plugins, list) or len(plugins) > MAX_INVENTORY_ROWS
+                or any(not isinstance(item, dict) or not plugin_id(item.get("id")) for item in plugins)):
             raise ValueError("Plugin inventory returned an invalid root or entry.")
         inventory = validate_inventory(plugins)
         sections = scan_bar_sections()
         for item in inventory:
             item["barSection"] = sections.get(item["id"], "") if sections is not None else ""
             item["barSectionKnown"] = sections is not None
+        if include_versions:
+            metadata_deadline = time.monotonic() + 20
+            with concurrent.futures.ThreadPoolExecutor(max_workers=UPDATES_WORKERS) as executor:
+                inventory = list(executor.map(lambda item: inventory_version_metadata(item, metadata_deadline), inventory))
         return inventory, False
     except (OSError, TimeoutError, ValueError):
         plugin_root = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "omarchy/plugins"
@@ -2643,7 +2869,7 @@ def scan_inventory() -> tuple[list[dict[str, Any]], bool]:
 def wait_for_plugin_inventory(identity: str, timeout: float = 30) -> dict[str, Any] | None:
     deadline = time.monotonic() + timeout
     while True:
-        inventory, unavailable = scan_inventory()
+        inventory, unavailable = scan_inventory(include_versions=False)
         if not unavailable:
             target = next((item for item in inventory if item["id"] == identity), None)
             if target is not None:
@@ -2653,7 +2879,7 @@ def wait_for_plugin_inventory(identity: str, timeout: float = 30) -> dict[str, A
         time.sleep(0.25)
 
 
-def installed_revision(identity: str) -> str:
+def installed_revision(identity: str, deadline: float | None = None) -> str:
     """Read the installed checkout revision without following a plugin-root symlink."""
     identity = plugin_id(identity)
     if not identity:
@@ -2664,16 +2890,577 @@ def installed_revision(identity: str) -> str:
     )
     try:
         metadata = target.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        if (stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode) or target.resolve() != target.absolute()
+                or (target / ".git").is_symlink() or not (target / ".git").is_dir()):
+            return ""
+        remaining = 5 if deadline is None else min(5, deadline - time.monotonic())
+        if remaining <= 0:
             return ""
         revision = run_command(
-            [COMMANDS["git"], "-C", str(target), "rev-parse", "--verify", "HEAD"],
-            5,
+            [COMMANDS["git"], "--no-optional-locks", "-C", str(target), "rev-parse", "--verify", "HEAD"],
+            remaining,
             256,
         ).decode("ascii", "replace")
     except (OSError, TimeoutError, ValueError):
         return ""
     return full_sha(revision)
+
+
+def plugin_install_path(identity: str) -> Path:
+    if not plugin_id(identity) or plugin_id(identity) != identity:
+        raise ValueError("Plugin updates require a valid plugin ID.")
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "omarchy/plugins" / identity
+
+
+def installed_manifest(identity: str) -> dict[str, Any]:
+    """Bounded manifest metadata, including development links; no code execution."""
+    descriptor = os.open(plugin_install_path(identity) / "manifest.json",
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_UPDATE_MANIFEST_BYTES:
+            raise ValueError("Installed plugin manifest is unavailable.")
+        raw = stream.read(MAX_UPDATE_MANIFEST_BYTES + 1)
+    return update_manifest(raw, identity)
+
+
+def update_manifest(raw: bytes, identity: str) -> dict[str, str]:
+    if len(raw) > MAX_UPDATE_MANIFEST_BYTES:
+        raise ValueError("Plugin manifest exceeds its size limit.")
+    value = safe_json_loads(raw, "Plugin manifest")
+    if not isinstance(value, dict) or value.get("id") != identity:
+        raise ValueError("Plugin manifest identity does not match the installed plugin.")
+    version = value.get("version")
+    if not isinstance(version, str) or not version or len(version) > 64 or one_line(version, 64) != version:
+        raise ValueError("Plugin manifest version is unavailable or invalid.")
+    return {"id": identity, "version": version, "name": one_line(value.get("name"), 120) or identity}
+
+
+def inventory_version_metadata(item: dict[str, Any], deadline: float | None = None) -> dict[str, Any]:
+    result = dict(item)
+    result["installedRevision"] = "" if item.get("firstParty") else installed_revision(item["id"], deadline)
+    try:
+        result["installedVersion"] = installed_manifest(item["id"])["version"]
+    except (OSError, ValueError):
+        # First-party manifests are owned by the host, whose list may supply a
+        # version. Third-party metadata must come from the installed directory.
+        if not item.get("firstParty"):
+            result["installedVersion"] = ""
+    return result
+
+
+def update_git(target: Path, arguments: list[str], deadline: float | None = None,
+               maximum: int = 64 * 1024) -> bytes:
+    remaining = 5 if deadline is None else min(5, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError("Plugin update check exceeded its time limit.")
+    return run_command([COMMANDS["git"], "--no-optional-locks", "-c", "core.fsmonitor=false",
+                        "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null",
+                        "-C", str(target), *arguments], remaining, maximum)
+
+
+def inspect_update_target(item: dict[str, Any], deadline: float | None = None) -> dict[str, Any]:
+    """Read-only local snapshot. sourceKey is private review evidence, not UI data.
+
+    Input is an authoritative inventory row. Returns installedVersion/Revision,
+    state/reason, canonical repository (or empty), and a sourceKey binding the
+    directory, origin, effective Git configuration, manifest and clean HEAD.
+    state='ready' is internal; all other states can be shown directly.
+    """
+    identity = item["id"]
+    target = plugin_install_path(identity)
+    result = {"installedVersion": item.get("installedVersion", ""), "installedRevision": "",
+              "state": "unavailable", "reason": "Installed repository is unavailable.",
+              "repository": "", "sourceKey": ""}
+    if item.get("firstParty"):
+        return {**result, "state": "managed", "reason": "First-party plugin updates are managed by Omarchy."}
+    try:
+        if target.is_symlink() or target.resolve() != target.absolute() or (target / ".git").is_file() \
+                or (target / ".git").is_symlink():
+            result.update(state="blocked" if identity == APP_ID else "development",
+                          reason="Development-linked plugins must be updated in their source checkout.")
+            result["installedVersion"] = installed_manifest(identity)["version"]
+            return result
+        manifest = installed_manifest(identity)
+        result["installedVersion"] = manifest["version"]
+        if not (target / ".git").is_dir():
+            return {**result, "state": "manual", "reason": "This plugin is not a Git installation. Update it using its original installation method."}
+        top = update_git(target, ["rev-parse", "--show-toplevel"], deadline).decode().strip()
+        if top != str(target):
+            return {**result, "state": "blocked", "reason": "Plugin repository layout is unsupported."}
+        revision = full_sha(update_git(target, ["rev-parse", "--verify", "HEAD"], deadline).decode())
+        if not revision:
+            return result
+        result["installedRevision"] = revision
+        if target != Path.home() / ".config/omarchy/plugins" / identity:
+            return {**result, "state": "blocked",
+                    "reason": "The native updater does not support this plugin configuration directory."}
+        origin = update_git(target, ["config", "--get-all", "remote.origin.url"], deadline).decode().strip()
+        effective = update_git(target, ["remote", "get-url", "--all", "origin"], deadline).decode().strip()
+        repository = github_repo(origin)
+        if not repository or origin != effective or "\n" in origin or origin != one_line(origin, 300):
+            return {**result, "state": "manual", "reason": "This source needs a manual update. Automatic checks support public GitHub HTTPS origins without URL rewrites."}
+        result["repository"] = repository[2]
+        dirty = update_git(target, ["status", "--porcelain=v1", "--untracked-files=normal",
+                                    "--ignore-submodules=none"], deadline)
+        tracked = update_git(target, ["ls-files", "-v", "-z"], deadline)
+        if any(entry[:1].islower() or entry[:1] == b"S" for entry in tracked.split(b"\0") if entry):
+            return {**result, "state": "blocked", "reason": "The checkout uses hidden worktree changes or sparse-checkout flags."}
+        # A whole effective-config digest catches source/configuration changes
+        # without persisting credentials or arbitrary Git configuration text.
+        config = update_git(target, ["config", "--null", "--list"], deadline)
+        info = target.stat()
+        evidence = json.dumps([str(target), info.st_dev, info.st_ino, revision,
+                                manifest, origin], sort_keys=True).encode() + config + dirty
+        result.update(state="customized" if dirty else "ready",
+                      reason="Automatic updates are unavailable while local edits or added files are present." if dirty else "",
+                      sourceKey=hashlib.sha256(evidence).hexdigest())
+        return result
+    except (OSError, UnicodeError, TimeoutError, ValueError):
+        return result
+
+
+def update_remote_json(url: str, deadline: float, maximum: int = 256 * 1024) -> Any:
+    remaining = min(10, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError("Plugin update check exceeded its time limit.")
+    return safe_json_loads(fetch_bytes(url, "api.github.com", maximum, remaining), "GitHub update check")
+
+
+class PublicUpdateUnavailable(ValueError):
+    """Anonymous remote evidence failed; never carry subprocess output to UI."""
+
+
+def public_update_head(repository: str, deadline: float) -> bytes:
+    """Bounded, anonymous ls-remote outside all installed repositories.
+
+    No inherited environment, Git configuration, netrc, proxy, askpass or
+    credential helpers. Unlike fetch, this never writes refs or Git objects.
+    The raw advertisement is private parser input, never a UI error message.
+    """
+    parsed = github_repo(repository)
+    if (not parsed or repository != one_line(repository, 300)
+            or any(part in {".", ".."} for part in parsed[:2])):
+        raise ValueError("Unsupported plugin update source.")
+    remaining = min(10, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError("Plugin update check exceeded its time limit.")
+    # '/' provides a stable, write-free location outside the installed source.
+    # Refuse the unusual case where it could contribute repository config.
+    if os.path.lexists("/.git"):
+        raise ValueError("An isolated public Git check is unavailable.")
+    environment = {"PATH": SYSTEM_COMMAND_PATH, "HOME": "/dev/null", "XDG_CONFIG_HOME": "/dev/null",
+                   "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
+                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
+                   "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false",
+                   "GIT_CEILING_DIRECTORIES": "/", "GIT_OPTIONAL_LOCKS": "0"}
+    argv = [COMMANDS["git"], "--no-optional-locks",
+            "-c", "credential.helper=", "-c", "core.askPass=/bin/false",
+            "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+            "-c", "http.followRedirects=false", "-c", "http.sslVerify=true",
+            "-c", "http.extraHeader=", "-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+            "ls-remote", "--symref", "--exit-code", "--", parsed[2] + ".git", "HEAD"]
+    stop = time.monotonic() + remaining
+    process = subprocess.Popen(argv, cwd="/", env=environment, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    _children.add(process)
+    selector = None
+    output = bytearray()
+    try:
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = stop - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Public Git HEAD check timed out.")
+            for key, _mask in selector.select(min(0.1, remaining)):
+                chunk = os.read(key.fd, min(4096, MAX_UPDATE_HEAD_BYTES + 1 - len(output)))
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output.extend(chunk)
+                if len(output) > MAX_UPDATE_HEAD_BYTES:
+                    raise ValueError("Public Git HEAD response exceeds its size limit.")
+        _wait_command(process, stop)
+        return bytes(output)
+    except BaseException as error:
+        _terminate_process(process)
+        if isinstance(error, (OSError, TimeoutError, subprocess.TimeoutExpired, ValueError)):
+            raise PublicUpdateUnavailable("Public Git HEAD could not be checked anonymously within its limits.") from None
+        raise
+    finally:
+        try:
+            if selector is not None:
+                selector.close()
+        finally:
+            try:
+                if process.stdout is not None:
+                    process.stdout.close()
+            finally:
+                _children.discard(process)
+
+
+def parse_update_head(raw: bytes) -> dict[str, str]:
+    """Accept exactly one symbolic HEAD and its full SHA, with no extra refs."""
+    error = "The public remote HEAD advertisement is missing, ambiguous or invalid."
+    if not isinstance(raw, bytes) or len(raw) > MAX_UPDATE_HEAD_BYTES:
+        raise ValueError(error)
+    try:
+        text = raw.decode("utf-8", "strict")
+    except UnicodeError:
+        raise ValueError(error) from None
+    lines = text.removesuffix("\n").split("\n")
+    if len(lines) != 2:
+        raise ValueError(error)
+    revision = branch = ""
+    for line in lines:
+        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD") and not branch:
+            branch = line[len("ref: refs/heads/"):-len("\tHEAD")]
+        elif re.fullmatch(r"[0-9a-f]{40}\tHEAD", line) and not revision:
+            revision = line[:40]
+        else:
+            raise ValueError(error)
+    # Git ref-format rules, with a small display-safe bound. Branch is metadata
+    # only: it is never interpolated into a command or used to fetch the manifest.
+    if (not revision or revision == "0" * 40 or not branch or len(branch) > 256 or ".." in branch or "@{" in branch
+            or branch.endswith(".") or any(ord(char) < 33 or ord(char) == 127 or char in "~^:?*[\\" for char in branch)
+            or one_line(branch, 256) != branch
+            or any(not part or part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
+        raise ValueError(error)
+    return {"revision": revision, "branch": branch}
+
+
+def remote_update_target(repository: str, identity: str, deadline: float | None = None) -> dict[str, str]:
+    """Resolve public origin's default-branch HEAD and identity at that exact SHA.
+
+    Returns {revision, version, branch}. Anonymous Git HEAD plus a pinned raw
+    manifest uses no GitHub REST quota. Does not fetch into any installed repo.
+    Raises a bounded ValueError/transport error when evidence is unavailable.
+    """
+    parsed = github_repo(repository)
+    if not parsed or not plugin_id(identity) or plugin_id(identity) != identity:
+        raise ValueError("Unsupported plugin update source.")
+    deadline = time.monotonic() + 35 if deadline is None else deadline
+    owner, name, _canonical = parsed
+    head = parse_update_head(public_update_head(repository, deadline))
+    revision, branch = head["revision"], head["branch"]
+    remaining = min(10, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError("Plugin update check exceeded its time limit.")
+    raw = fetch_bytes(f"https://raw.githubusercontent.com/{owner}/{name}/{revision}/manifest.json",
+                      "raw.githubusercontent.com", MAX_UPDATE_MANIFEST_BYTES, remaining)
+    manifest = update_manifest(raw, identity)
+    return {"revision": revision, "version": manifest["version"], "branch": branch}
+
+
+def check_plugin_update(item: dict[str, Any], now: float | None = None,
+                        snapshot: dict[str, Any] | None = None,
+                        deadline: float | None = None) -> dict[str, Any]:
+    """Return one public update record; failures are unavailable, never updateable.
+
+    Optional snapshot must come from inspect_update_target, never a request.
+    Ordinary available records alone have canUpdate; Outfit uses selfUpdate.
+    """
+    deadline = time.monotonic() + 45 if deadline is None else deadline
+    local = inspect_update_target(item, deadline) if snapshot is None else snapshot
+    identity = item["id"]
+    result = {"id": identity, "name": one_line(item.get("name"), 120) or identity,
+              "installedVersion": local["installedVersion"], "availableVersion": "",
+              "installedRevision": local["installedRevision"], "availableRevision": "",
+              "state": local["state"], "canUpdate": False, "selfUpdate": identity == APP_ID,
+              "reason": local["reason"], "checkError": "", "checkedAt": time.time() if now is None else now}
+    customized = local["state"] == "customized"
+    if local["state"] not in {"ready", "customized"}:
+        return result
+    if not customized:
+        result.update(state="unavailable", reason="Public update information is unavailable; try again later.")
+    failure = "Upstream version could not be checked. Try again later."
+    try:
+        remote = remote_update_target(local["repository"], identity, deadline)
+        result.update(availableVersion=remote["version"], availableRevision=remote["revision"])
+        # Upstream metadata is useful even when the installed tree is customized.
+        # It is informational, not a proposed upgrade/downgrade or permission to mutate.
+        if customized:
+            return result
+        if remote["revision"] == local["installedRevision"]:
+            result.update(state="current", reason="Installed at the remote default-branch revision.")
+            return result
+        parsed = github_repo(local["repository"])
+        assert parsed is not None
+        comparison = update_remote_json(
+            f"https://api.github.com/repos/{parsed[0]}/{parsed[1]}/compare/"
+            f"{local['installedRevision']}...{remote['revision']}?per_page=1", deadline, 1024 * 1024)
+        if not isinstance(comparison, dict):
+            return result
+        base = comparison.get("base_commit")
+        ancestor = comparison.get("merge_base_commit")
+        if (comparison.get("status") != "ahead" or type(comparison.get("behind_by")) is not int
+                or comparison.get("behind_by") != 0
+                or type(comparison.get("ahead_by")) is not int or comparison["ahead_by"] <= 0
+                or not isinstance(base, dict) or base.get("sha") != local["installedRevision"]
+                or not isinstance(ancestor, dict) or ancestor.get("sha") != local["installedRevision"]):
+            result.update(state="blocked", reason="Local history is ahead, diverged, or cannot be verified as a fast-forward.")
+            return result
+        if identity == LEGACY_APP_ID:
+            result.update(state="blocked", reason="The legacy Outfit installation requires identity migration.")
+        else:
+            result.update(state="available", canUpdate=identity != APP_ID,
+                          reason="Outfit requires its dedicated self-update flow." if identity == APP_ID else
+                          "A fast-forward update is available on the remote default branch.")
+    except PublicUpdateUnavailable:
+        failure = "The upstream repository is private or unavailable without credentials. Try again later."
+    except urllib.error.HTTPError as error:
+        # Never expose an HTTP body, URL or exception text (including credentials).
+        headers = error.headers or {}
+        error.close()
+        if error.code == 429 or (error.code == 403 and (
+                (headers.get("X-RateLimit-Remaining") or headers.get("x-ratelimit-remaining")) == "0"
+                or headers.get("Retry-After") or headers.get("retry-after"))):
+            failure = "GitHub is rate-limiting public update checks. Retry after the limit resets; failed checks expire after five minutes."
+        elif error.code == 403:
+            failure = "GitHub denied or rate-limited this public update request. Retry later."
+        elif error.code == 404:
+            failure = "The public update source, manifest or history is missing or inaccessible without credentials."
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        pass
+    if customized:
+        result["checkError"] = failure
+    elif result["state"] == "unavailable":
+        result["reason"] = failure
+    return result
+
+
+def load_plugin_updates(store: Store) -> dict[str, Any]:
+    try:
+        cached = store.read("plugin-updates.json", MAX_UPDATES_CACHE_BYTES, {})
+        entries = cached.get("entries") if isinstance(cached, dict) and cached.get("schema") == 1 else None
+        if isinstance(entries, dict) and len(entries) <= MAX_INVENTORY_ROWS + 1:
+            output = {}
+            for identity, entry in entries.items():
+                if not identity or plugin_id(identity) != identity or not isinstance(entry, dict):
+                    continue
+                row = entry.get("record")
+                if not isinstance(row, dict) or row.get("id") != identity:
+                    continue
+                checked = row.get("checkedAt")
+                if (type(checked) not in (int, float) or not 0 <= checked <= 253402300799
+                        or not isinstance(row.get("state"), str)
+                        or row["state"] not in {"available", "current", "blocked", "unavailable", "managed", "development", "customized", "manual"}
+                        or type(row.get("canUpdate")) is not bool or type(row.get("selfUpdate")) is not bool
+                        or row["selfUpdate"] != (identity == APP_ID)
+                        or (row["canUpdate"] and (row["state"] != "available" or identity in {APP_ID, LEGACY_APP_ID}))
+                        or not isinstance(entry.get("sourceKey"), str)
+                        or (entry["sourceKey"] and not re.fullmatch(r"[0-9a-f]{64}", entry["sourceKey"]))):
+                    continue
+                fields = {"id": identity, "checkedAt": checked, "state": row["state"],
+                          "canUpdate": row["canUpdate"], "selfUpdate": row["selfUpdate"]}
+                for key, limit in (("name", 120), ("reason", 300), ("checkError", 300), ("installedVersion", 64), ("availableVersion", 64)):
+                    fields[key] = one_line(row.get(key), limit)
+                for key in ("installedRevision", "availableRevision"):
+                    fields[key] = full_sha(row.get(key))
+                output[identity] = {"record": fields, "sourceKey": entry["sourceKey"]}
+            return output
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def cached_update_matches(entry: Any, local: dict[str, Any], now: float) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get("record"), dict):
+        return False
+    checked = entry["record"].get("checkedAt")
+    maximum_age = UPDATES_RETRY_AGE if entry["record"].get("state") == "unavailable" or entry["record"].get("checkError") else UPDATES_MAX_AGE
+    return (type(checked) in (int, float) and math.isfinite(checked) and 0 <= now - checked < maximum_age
+            and local["state"] in {"ready", "customized"} and bool(local["sourceKey"])
+            and (local["state"] == "customized") == (entry["record"].get("state") == "customized")
+            and entry.get("sourceKey") == local["sourceKey"]
+            and entry["record"].get("installedRevision") == local["installedRevision"]
+            and entry["record"].get("installedVersion") == local["installedVersion"])
+
+
+def check_plugin_updates(request: dict[str, Any], store: Store, now: float, generation: int) -> dict[str, Any]:
+    if "force" in request and type(request["force"]) is not bool:
+        raise ValueError("Update refresh force must be a boolean.")
+    selected = request.get("pluginId", "")
+    if not isinstance(selected, str) or (selected and (not plugin_id(selected) or plugin_id(selected) != selected)):
+        raise ValueError("Plugin updates require a valid plugin ID.")
+    inventory, unavailable = scan_inventory(include_versions=False)
+    items = list(inventory)
+    # The shell can omit its own development-linked service during discovery.
+    if not any(item["id"] == APP_ID for item in items):
+        items.append({"id": APP_ID, "name": "Outfit", "firstParty": False})
+    if selected and not any(item["id"] == selected for item in items):
+        raise ValueError("The selected plugin is no longer installed.")
+    cached = load_plugin_updates(store)
+    deadline = time.monotonic() + UPDATES_TIMEOUT
+
+    def check(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        local = inspect_update_target(item, deadline)
+        previous = cached.get(item["id"])
+        if not unavailable and request.get("force") is not True and cached_update_matches(previous, local, now):
+            return item["id"], previous
+        if unavailable:
+            local.update(state="unavailable", reason="Authoritative plugin inventory is unavailable.")
+        record = check_plugin_update(item, now, local, deadline)
+        return item["id"], {"record": record, "sourceKey": local["sourceKey"]}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=UPDATES_WORKERS) as executor:
+        fresh = dict(executor.map(check, [item for item in items if not selected or item["id"] == selected]))
+    ids = {item["id"] for item in items}
+    with store.scoped_lock():
+        merged = load_plugin_updates(store)
+        merged.update(fresh)
+        merged = {identity: entry for identity, entry in merged.items() if identity in ids}
+        store.write("plugin-updates.json", {"schema": 1, "entries": merged}, MAX_UPDATES_CACHE_BYTES)
+    # Targeted responses include the refreshed record only. Unrelated reviews
+    # remain in the per-ID cache, without presenting stale inventory as current.
+    records = [entry["record"] for entry in fresh.values()]
+    inventory = inventory_display_metadata(inventory, request, merged)
+    return {"ok": True, "action": "check-updates", "generation": generation, "responseKind": "updates",
+            "updates": records, "updatesCheckedAt": max((row["checkedAt"] for row in records), default=0),
+            "updatesError": "Authoritative plugin inventory is unavailable." if unavailable else "",
+            "updatesUnavailableCount": sum(row["state"] == "unavailable" or bool(row.get("checkError")) for row in records),
+            "inventory": inventory, "inventoryAuthoritative": not unavailable,
+            "installed": sorted(item["id"] for item in inventory)}
+
+
+@contextmanager
+def plugin_update_lock(store: Store):
+    """Serialize native updates across helper processes, independently of cache IO."""
+    descriptor = os.open(".plugin-update.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=store.fd)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("Unsafe plugin update lock.")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError("Another plugin update is running; try again after it finishes.") from error
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def inventory_display_metadata(inventory: list[dict[str, Any]], request: dict[str, Any],
+                               reviews: dict[str, Any], observed: dict[str, Any] | None = None,
+                               identity: str = "") -> list[dict[str, Any]]:
+    """Carry advisory display metadata without re-probing unrelated repositories.
+
+    Never use these rows as mutation evidence. Host state stays authoritative;
+    fresh selected-target inspection wins over reviews and prior UI metadata.
+    """
+    previous = {row["id"]: row for row in validate_inventory(request.get("inventory"))}
+    result = []
+    for item in inventory:
+        fields = previous.get(item["id"], {})
+        fields = {**fields, **reviews.get(item["id"], {}).get("record", {})}
+        if observed is not None and item["id"] == identity:
+            fields = observed
+        result.append({**item, **{key: fields.get(key, item.get(key, ""))
+                                  for key in ("installedVersion", "installedRevision")}})
+    return result
+
+
+def execute_plugin_update(request: dict[str, Any], store: Store, now: float,
+                          generation: int, preferences: dict[str, Any], phase: Any) -> dict[str, Any]:
+    identity = plugin_id(request.get("pluginId"))
+    expected = full_sha(request.get("expectedRevision"))
+    installed = full_sha(request.get("expectedInstalledRevision"))
+    if not identity or identity != request.get("pluginId") or not expected or not installed \
+            or expected != request.get("expectedRevision") or installed != request.get("expectedInstalledRevision"):
+        raise ValueError("Plugin updates require an ID and the reviewed installed and available revisions.")
+    if identity in {APP_ID, LEGACY_APP_ID}:
+        raise ValueError("Outfit cannot use the ordinary plugin updater for itself.")
+    if "batchItem" in request and type(request["batchItem"]) is not bool:
+        raise ValueError("Plugin update batchItem must be a boolean.")
+    # Native omarchy-plugin-update currently uses HOME/.config, not XDG_CONFIG_HOME.
+    if plugin_install_path(identity) != Path.home() / ".config/omarchy/plugins" / identity:
+        raise ValueError("The native updater does not support this plugin configuration directory.")
+    with plugin_update_lock(store):
+        phase("checking")
+        inventory, unavailable = scan_inventory(include_versions=False)
+        if unavailable:
+            raise ValueError("Outfit could not verify authoritative plugin inventory.")
+        target = next((item for item in inventory if item["id"] == identity), None)
+        if target is None:
+            raise ValueError("The selected plugin is no longer installed.")
+        local = inspect_update_target(target)
+        reviewed = load_plugin_updates(store).get(identity)
+        if (not cached_update_matches(reviewed, local, now) or local["installedRevision"] != installed
+                or reviewed["record"].get("availableRevision") != expected
+                or reviewed["record"].get("state") != "available"
+                or reviewed["record"].get("canUpdate") is not True):
+            raise ValueError("The installed source or reviewed update changed; check updates and review again.")
+        if target.get("barSectionKnown") is not True:
+            raise ValueError("Plugin bar placement could not be verified; retry after inventory is available.")
+        fresh = check_plugin_update(target, now, local)
+        if (fresh["state"] != "available" or not fresh["canUpdate"]
+                or fresh["availableRevision"] != expected
+                or fresh["availableVersion"] != reviewed["record"].get("availableVersion")):
+            raise ValueError("The remote target changed or could not be verified; check updates and review again.")
+        # Re-read source/cleanliness after network IO, immediately before native
+        # dispatch. Native has no pinned-revision argument: a later remote move
+        # is detected from resulting HEAD, never reported as reviewed success.
+        latest_inventory, latest_unavailable = scan_inventory(include_versions=False)
+        latest_target = next((item for item in latest_inventory if item["id"] == identity), None)
+        if (latest_unavailable or latest_target is None or latest_target.get("firstParty")
+                or latest_target.get("enabled") != target.get("enabled")
+                or latest_target.get("barSectionKnown") is not True
+                or latest_target.get("barSection") != target.get("barSection")):
+            raise ValueError("Plugin enabled state or placement changed during verification; review the update again.")
+        latest = inspect_update_target(latest_target)
+        if latest["state"] != "ready" or latest["sourceKey"] != local["sourceKey"]:
+            raise ValueError("The installed checkout changed during verification; review the update again.")
+        phase("updating")
+        command_failed = False
+        try:
+            run_command([COMMANDS["omarchy"], "plugin", "update", identity, "--yes"], 90, 128 * 1024)
+        except (OSError, TimeoutError, ValueError):
+            command_failed = True
+        phase("verifying")
+        inventory, unavailable = scan_inventory(include_versions=False)
+        after = next((item for item in inventory if item["id"] == identity), None)
+        observed = inspect_update_target(after) if after is not None and not unavailable else None
+        verified = bool(not command_failed and observed and observed["state"] == "ready"
+                        and observed["repository"] == local["repository"]
+                        and observed["installedRevision"] == expected
+                        and observed["installedVersion"] == fresh["availableVersion"]
+                        and after.get("enabled") == target.get("enabled")
+                        and after.get("barSectionKnown") is True
+                        and after.get("barSection") == target.get("barSection"))
+        notice = "Plugin updated; enabled state and bar placement preserved." if verified else ""
+        error = ""
+        if not verified:
+            if command_failed and observed and observed["installedRevision"] == installed:
+                error = "Omarchy did not complete the update; the original revision remains installed (the update may have been rolled back)."
+            elif observed and observed["installedRevision"] and observed["installedRevision"] not in {installed, expected}:
+                error = "The installed revision differs from the reviewed target; the remote may have moved during the native update. Check updates again."
+            elif command_failed:
+                error = "The native update failed or timed out; its final result is not verified. Check inventory and updates again."
+            else:
+                error = "The resulting revision, version, enabled state or placement could not be verified. Check inventory and updates again."
+        operation = {"pluginId": identity, "expectedRevision": expected,
+                     "expectedInstalledRevision": installed, "expectedVersion": fresh["availableVersion"],
+                     "installedRevision": "", "installedVersion": "",
+                     "batchItem": request.get("batchItem") is True,
+                     "status": "completed" if verified else "partial", "verified": verified,
+                     "message": notice or error}
+        if observed:
+            operation.update(installedRevision=observed["installedRevision"], installedVersion=observed["installedVersion"])
+        # Invalidate this review after every attempted native update, including
+        # failure/rollback. Other IDs' independently reviewed targets survive.
+        with store.scoped_lock():
+            entries = load_plugin_updates(store)
+            entries.pop(identity, None)
+            store.write("plugin-updates.json", {"schema": 1, "entries": entries}, MAX_UPDATES_CACHE_BYTES)
+        inventory = inventory_display_metadata(inventory, request, entries, observed, identity)
+        profile = [item for item in validate_profile(request.get("profile"))
+                   if item.get("source", "hardware") == "hardware" or item["id"].startswith("capability-")]
+        return plugin_mutation_response(request, "update-plugin", generation, identity, profile, [],
+                                        inventory, unavailable, preferences, operation, notice, error)
 
 
 def is_bar_widget(item: dict[str, Any]) -> bool:
@@ -3132,6 +3919,8 @@ class ReadmeIndex:
                 if row[1]:
                     self.db.execute("INSERT INTO readme_fts(readme_fts,rowid,body) VALUES('delete',?,?)", row)
                 self.db.execute("DELETE FROM documents WHERE key=?", (key,))
+            if prune and self.db.execute("SELECT 1 FROM sqlite_master WHERE name='search_pack_sources'").fetchone():
+                self.db.execute("DELETE FROM search_pack_sources WHERE key NOT IN (SELECT key FROM documents)")
             self.db.executemany("INSERT OR IGNORE INTO documents(key) VALUES(?)", ((key,) for key in keys))
         # Existing inspector documents provide immediate useful coverage.
         for item in items:
@@ -3419,6 +4208,18 @@ def search_pack_state(store: Store, now: float | None = None) -> dict[str, Any]:
     return result
 
 
+def pack_coverage(index: ReadmeIndex, keys: set[str]) -> tuple[str, str]:
+    """Proof of which catalog keys were considered and their retained index state.
+
+    A matching asset alone is insufficient: an unchanged pack may contain a key
+    that only became relevant after our previous import, or a pruned document.
+    """
+    catalog = hashlib.sha256(json.dumps(sorted(keys)).encode()).hexdigest()
+    states = index.states(keys)
+    coverage = hashlib.sha256(json.dumps(sorted(states.items())).encode()).hexdigest()
+    return catalog, coverage
+
+
 def prepare_search(store: Store, now: float, progress: Any = None) -> dict[str, Any]:
     emit = progress or (lambda *args, **kwargs: None)
     lock = os.open(".readme-index.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -3467,6 +4268,17 @@ def prepare_search(store: Store, now: float, progress: Any = None) -> dict[str, 
                     fetch_search_pack(SEARCH_PACK_URL, 64 * 1024), "Search pack manifest"))
                 if state["generatedAt"] and listing_time(manifest["generatedAt"]) < listing_time(state["generatedAt"]):
                     raise ValueError("Search pack is older than the installed seed.")
+                with store.scoped_lock(), index.db:
+                    current = {readme_key(item) for item in load_catalog(store)[0]} - {""}
+                    catalog_proof, coverage_proof = pack_coverage(index, current)
+                    if (all(state.get(key) == value for key, value in manifest.items())
+                            and state.get("packCatalogKeys") == catalog_proof
+                            and state.get("packCoverage") == coverage_proof):
+                        state.update(manifest, state="ready", lastAttemptAt=now,
+                                     nextCheckAt=now + SEARCH_PACK_INTERVAL, failures=0,
+                                     interruptedAttempts=0, error="", due=False)
+                        receipt(state)
+                        return state
                 emit("download", "Downloading public search pack", bytesReceived=0,
                      bytesTotal=manifest["compressedBytes"])
                 packed = fetch_search_pack(manifest["assetUrl"], MAX_PACK_BYTES,
@@ -3475,13 +4287,22 @@ def prepare_search(store: Store, now: float, progress: Any = None) -> dict[str, 
                 imported = skipped = processed = 0
                 emit("import", "Validating and staging search documents", processed=0,
                      total=manifest["docCount"], committed=0)
+                # Gzip/checksum/legal validation runs outside the general cache
+                # lock. A connection-private, disk-backed staging table bounds
+                # memory and keeps malformed tails away from the live index.
+                index.db.execute("PRAGMA temp_store=FILE")
+                index.db.execute("CREATE TEMP TABLE pack_stage (record TEXT)")
+                with index.db:
+                    for record in pack_records(packed, manifest):
+                        index.db.execute("INSERT INTO pack_stage VALUES(?)", (json.dumps(record, separators=(",", ":")),))
                 # Serialize with catalog replacement, and re-read current keys only
                 # after downloading. Never sync/prune against a seed's old catalog.
                 with store.scoped_lock(), index.db:
                     current = {readme_key(item) for item in load_catalog(store)[0]} - {""}
                     states = index.states(current)
                     index.db.execute("CREATE TABLE IF NOT EXISTS search_pack_sources (key TEXT PRIMARY KEY, attribution TEXT NOT NULL)")
-                    for record in pack_records(packed, manifest):
+                    for staged in index.db.execute("SELECT record FROM pack_stage"):
+                        record = json.loads(staged[0])
                         processed += 1
                         old = states.get(record["key"]) if record else None
                         if (record is None or record["key"] not in current
@@ -3516,6 +4337,7 @@ def prepare_search(store: Store, now: float, progress: Any = None) -> dict[str, 
                     state.update(manifest, state="ready", importedAt=now, nextCheckAt=now + SEARCH_PACK_INTERVAL,
                                  documentCount=manifest["docCount"], imported=imported, skipped=skipped, failures=0,
                                  interruptedAttempts=0, error="", due=False)
+                    state["packCatalogKeys"], state["packCoverage"] = pack_coverage(index, current)
                     receipt(state)
                 emit("commit", "Search pack imported", processed=processed, total=manifest["docCount"],
                      committed=imported, skipped=skipped)
@@ -3563,18 +4385,29 @@ def readme_index_snapshot(store: Store, keys: set[str] | None = None) -> tuple[d
     return states, retry
 
 
+def lru_hit(cache: dict, key: Any) -> Any:
+    value = cache.pop(key)
+    cache[key] = value
+    return value
+
+
+def lru_put(cache: dict, key: Any, value: Any, capacity: int = 4) -> None:
+    cache.pop(key, None)
+    while len(cache) >= capacity:
+        del cache[next(iter(cache))]
+    cache[key] = value
+
+
 def indexed_search_matches(store: Store, query: str, keys: set[str] | None = None) -> dict[str, dict[str, Any]]:
     stamp = readme_index_stamp(store)
     cache = store.memory.setdefault("indexQueries", {})
     key = (stamp, query, frozenset(keys) if keys is not None else None)
     if key in cache:
-        return cache[key]
+        return lru_hit(cache, key)
     with ReadmeIndex(store) as index:
         result = index.evidence(query, keys)
     if readme_index_stamp(store) == stamp:
-        if len(cache) >= 4:
-            cache.clear()
-        cache[key] = result
+        lru_put(cache, key, result)
     return result
 
 
@@ -3674,7 +4507,7 @@ def attach_interest_evidence(store: Store, items: list[dict[str, Any]], criteria
         cache = store.memory.setdefault("interestReadmes", {})
         cached = cache.get(cache_key)
         if cached is not None:
-            found, states = cached
+            found, states = lru_hit(cache, cache_key)
         else:
             # One bounded corpus pass, with a single compiled matcher rather than
             # 64 interests x 4 phrases x every complete README. Overlapping phrases
@@ -3706,9 +4539,7 @@ def attach_interest_evidence(store: Store, items: list[dict[str, Any]], criteria
             # A transient lock/error is not a stable empty corpus. A write racing
             # this snapshot must also be observed by the very next query.
             if not failed and readme_index_stamp(store) == cache_key[0]:
-                if len(cache) >= 4:
-                    cache.clear()
-                cache[cache_key] = (found, states)
+                lru_put(cache, cache_key, (found, states))
     partial = failed
     for item in items:
         key = readme_key(item)
@@ -4064,6 +4895,14 @@ def index_readmes(store: Store, items: list[dict[str, Any]], now: float, progres
             failed = 0
             cooldown = 0
             completed = 0
+            documents = readme_index_data(store, items, now=now)["documents"] if progress is not None else None
+
+            def progress_state(state):
+                kind, version, _attempts, _retry, has_text, _truncated = state
+                terminal = ("indexed" if has_text and version == SEARCH_INDEX_VERSION else
+                            kind if kind in {"unavailable", "failed"} else "")
+                return terminal or "pending", bool(kind == "excluded" and not terminal)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=README_WORKERS) as executor:
                 futures = {executor.submit(fetch_search_readme, item): key for key, item in selected.items()}
                 for future in concurrent.futures.as_completed(futures):
@@ -4075,10 +4914,17 @@ def index_readmes(store: Store, items: list[dict[str, Any]], now: float, progres
                     index.put(futures[future], document, now)
                     completed += 1
                     if progress is not None:
-                        documents = readme_index_data(store, items, now=now)["documents"]
+                        key = futures[future]
+                        latest = index.states({key})[key]
+                        for state, delta in ((states[key], -1), (latest, 1)):
+                            kind, skipped = progress_state(state)
+                            documents[kind] += delta
+                            documents["processed"] += delta * int(kind != "pending")
+                            documents["skipped"] += delta * int(skipped)
+                        states[key] = latest
                         progress("index", "README document checked", processed=documents["processed"],
                                  total=documents["total"], indexed=documents["indexed"], committed=completed,
-                                 batchProcessed=completed, batchTotal=len(selected), documents=documents)
+                                 batchProcessed=completed, batchTotal=len(selected), documents=dict(documents))
                     failed += int(not document.get("ok") and not document.get("unavailable"))
                     cooldown = max(cooldown, min(86400, max(0, int(document.get("cooldown", 0)))))
                     if cooldown:
@@ -4103,7 +4949,7 @@ def load_readmes(store: Store) -> dict[str, dict[str, Any]]:
     memory = getattr(store, "memory", {})
     stamp = store.stamp("readmes.json")
     if isinstance(memory.get("readmes"), dict) and stamp == memory.get("readmesStamp"):
-        return memory["readmes"]
+        return dict(memory["readmes"])
     raw = store.read("readmes.json", MAX_CACHE_BYTES, {"schema": README_SCHEMA, "entries": {}})
     if not isinstance(raw, dict) or raw.get("schema") != README_SCHEMA or not isinstance(raw.get("entries"), dict):
         raise ValueError("Outfit README index is invalid; refresh it to rebuild.")
@@ -4132,10 +4978,29 @@ def load_readmes(store: Store) -> dict[str, dict[str, Any]]:
             }
     memory["readmes"] = entries
     memory["readmesStamp"] = stamp
-    return entries
+    return dict(entries)
 
 
-def save_readmes(store: Store, entries: dict[str, dict[str, Any]]) -> None:
+def save_readmes(store: Store, entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Merge fetched entries into fresh disk state; callers fetch outside the lock.
+
+    Older snapshots cannot overwrite a newer fetch, even for the same ID.
+    Returns the merged cache for callers that need to attach display metadata.
+    """
+    with store.scoped_lock():
+        store.memory.pop("readmes", None)
+        try:
+            latest = load_readmes(store)
+        except ValueError:
+            latest = {}
+        for identity, entry in entries.items():
+            if entry.get("fetchedAt", 0) >= latest.get(identity, {}).get("fetchedAt", 0):
+                latest[identity] = entry
+        _write_readmes(store, latest)
+        return load_readmes(store)
+
+
+def _write_readmes(store: Store, entries: dict[str, dict[str, Any]]) -> None:
     retained = sorted(entries.items(), key=lambda item: item[1].get("fetchedAt", 0), reverse=True)[:MAX_README_ENTRIES]
     compact: dict[str, dict[str, Any]] = {}
     for identity, entry in retained:
@@ -4164,7 +5029,13 @@ def save_readmes(store: Store, entries: dict[str, dict[str, Any]]) -> None:
             del compact[identity]
         else:
             budget -= size
-    store.write("readmes.json", {"schema": README_SCHEMA, "entries": compact}, MAX_CACHE_BYTES)
+    value = {"schema": README_SCHEMA, "entries": compact}
+    try:
+        previous = store.read("readmes.json", MAX_CACHE_BYTES, None)
+    except ValueError:
+        previous = None
+    if value != previous:
+        store.write("readmes.json", value, MAX_CACHE_BYTES)
 
 
 def attach_cached_readmes(items: list[dict[str, Any]], entries: dict[str, dict[str, Any]]) -> None:
@@ -4195,6 +5066,7 @@ def enrich_readmes(store: Store, candidates: list[dict[str, Any]], entries: dict
         return 0
     now = time.time()
     fetched = 0
+    updates = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=README_WORKERS) as executor:
         futures = {executor.submit(fetch_readme, item): item for item in missing}
         for future in concurrent.futures.as_completed(futures):
@@ -4205,7 +5077,7 @@ def enrich_readmes(store: Store, candidates: list[dict[str, Any]], entries: dict
                 document = {"ok": False}
             if not document or document.get("ok") is not True:
                 continue
-            entries[item["id"]] = {
+            updates[item["id"]] = {
                 "commit": item["listingCommit"],
                 "text": document["text"],
                 "content": document["content"],
@@ -4217,7 +5089,10 @@ def enrich_readmes(store: Store, candidates: list[dict[str, Any]], entries: dict
                 "fetchedAt": now,
             }
             fetched += 1
-    save_readmes(store, entries)
+    if updates:
+        merged = save_readmes(store, updates)
+        entries.clear()
+        entries.update(merged)
     return fetched
 
 
@@ -4524,7 +5399,7 @@ def search_evidence(item: dict[str, Any], query: str, include_readme: bool = Tru
            None if indexed is None else (indexed["matchedTokens"], indexed["boost"], indexed["window"], indexed["tokenWindows"]))
     cache = item.setdefault("_searchEvidenceCache", {})
     if key in cache:
-        return cache[key]
+        return lru_hit(cache, key)
     metadata = {field: _search_text_evidence(text, query) for field, text in fields.items() if field != "readme"}
     readme = indexed if indexed is not None else _search_text_evidence(fields.get("readme", ""), query)
     covered = {word for evidence in metadata.values() for word in evidence["matchedTokens"]}
@@ -4579,9 +5454,7 @@ def search_evidence(item: dict[str, Any], query: str, include_readme: bool = Tru
               "tier": tier, "complete": complete, "matchedTokens": tuple(word for word in words if word in matched),
               "reason": reason, "readmePrimary": readme_primary, "snippetWindow": snippet_window,
               "indexed": indexed is not None}
-    if len(cache) >= 4:
-        cache.clear()
-    cache[key] = result
+    lru_put(cache, key, result)
     return result
 
 
@@ -4612,7 +5485,7 @@ def search_snippets(selected: list[dict[str, Any]], query: str, store: Store | N
         if evidence["indexed"] and store is not None:
             key = (stamp, readme_key(item), query, evidence["snippetWindow"])
             if key in cache:
-                output[item["id"]] = cache[key]
+                output[item["id"]] = lru_hit(cache, key)
             else:
                 pending.append((item, evidence, key))
         elif not evidence["indexed"]:
@@ -4625,9 +5498,7 @@ def search_snippets(selected: list[dict[str, Any]], query: str, store: Store | N
                         row = index.db.execute("SELECT body FROM documents WHERE key=?", (key[1],)).fetchone()
                         if row:
                             output[item["id"]] = _search_excerpt(row[0], evidence["snippetWindow"])
-                            if len(cache) >= MAX_SETUP_PAGE_SIZE * 4:
-                                cache.clear()
-                            cache[key] = output[item["id"]]
+                            lru_put(cache, key, output[item["id"]], MAX_SETUP_PAGE_SIZE * 4)
         except (OSError, ValueError, sqlite3.Error):
             pass
     return output
@@ -5568,10 +6439,20 @@ def save_catalog(store: Store, items: list[dict[str, Any]], generated: str, now:
 
 
 def preview_cache_summary(store: Store, clear: bool = False) -> dict[str, int]:
+    if clear:
+        with store.scoped_lock():
+            # Retire in-flight negative/discovery writes as well as disk state.
+            store.write("preview-generation.json", {"generation": uuid.uuid4().hex}, 1024)
+            return _preview_cache_summary(store, clear=True)
+    return _preview_cache_summary(store)
+
+
+def _preview_cache_summary(store: Store, clear: bool = False) -> dict[str, int]:
     total = count = removed = 0
     for name in os.listdir(store.fd):
         if not (PREVIEW_FILENAME.fullmatch(name) or LEGACY_PREVIEW_FILENAME.fullmatch(name)
-                or THUMBNAIL_FILENAME.fullmatch(name)):
+                or THUMBNAIL_FILENAME.fullmatch(name)
+                or (clear and name in {"thumbnail-readmes.json", "thumbnail-failures.json"})):
             continue
         try:
             info = os.stat(name, dir_fd=store.fd, follow_symlinks=False)
@@ -5620,7 +6501,7 @@ def diagnostics(store: Store, preferences_store: Store) -> dict[str, Any]:
 
 
 PLUGIN_MUTATIONS = {
-    "install-plugin", "enable-plugin", "disable-plugin", "place-plugin", "remove-plugin",
+    "install-plugin", "enable-plugin", "disable-plugin", "place-plugin", "remove-plugin", "update-plugin",
 }
 PROGRESS_ACTIONS = PLUGIN_MUTATIONS | {"catalog-refresh", "prepare-search", "index-readmes", "analyze", "rescan", "refresh"}
 
@@ -5633,6 +6514,11 @@ def mutation_observed(
         return target is None
     if target is None:
         return False
+    if action == "update-plugin":
+        expected = full_sha(request.get("expectedRevision"))
+        version = request.get("expectedVersion")
+        return bool(expected and full_sha(target.get("installedRevision")) == expected
+                    and (not version or target.get("installedVersion") == version))
     if action == "disable-plugin":
         return target["enabled"] is False
     if action == "enable-plugin":
@@ -5669,8 +6555,11 @@ def plugin_mutation_response(
 ) -> dict[str, Any]:
     operation = dict(operation)
     operation["observed"] = not inventory_unavailable and mutation_observed(
-        action, request, identity, inventory,
+        action, {**request, **({"expectedVersion": operation.get("expectedVersion")} if action == "update-plugin" else {})},
+        identity, inventory,
     )
+    if action == "update-plugin":
+        operation["observed"] = operation["observed"] and operation.get("verified") is True
     if inventory_unavailable:
         unavailable = sorted(set(unavailable + ["installed plugins"]))
     elif any(item.get("barSectionKnown") is False for item in inventory):
@@ -5709,10 +6598,20 @@ def run(
         "diagnostics", "clear-previews", "discover", "index-readmes", "save-density",
         "context", "save-interests", "preview-interest", "matches", "review-matches",
         "host-lifecycle", "open-plugin", "catalog-refresh", "prepare-search",
+        "check-updates", "update-plugin", "self-update", "self-update-status",
     }:
         raise ValueError("Outfit request has an unsupported action.")
     generation = request.get("generation")
     generation = generation if type(generation) is int and 0 <= generation <= 2_147_483_647 else 0
+    if action in {"self-update", "self-update-status"}:
+        if store is None:
+            raise ValueError("Self-update requires the Outfit cache store.")
+        spec = importlib.util.spec_from_file_location("outfit_self_update", Path(__file__).with_name("self_update.py"))
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        backend = types.SimpleNamespace(**globals())
+        result = helper.launch(backend, request, store) if action == "self-update" else helper.status(backend, store)
+        return {**result, "action": action, "generation": generation, "responseKind": "self-update"}
     if action == "host-lifecycle":
         return host_lifecycle(request, generation)
     if action == "open-plugin":
@@ -5733,13 +6632,15 @@ def run(
                       "inventory": "Waiting for Omarchy to discover the installed plugin",
                       "enabling": "Enabling plugin", "disabling": "Disabling plugin",
                       "placing": "Placing bar widget", "removing": "Removing plugin",
-                      "verifying": "Verifying the resulting plugin state"}
+                      "verifying": "Verifying the resulting plugin state", "updating": "Updating plugin"}
             emit(name, labels[name], pluginId=plugin_id(request.get("pluginId")))
     current_time = time.time() if now is None else now
     notice = ""
     error = ""
     operation: dict[str, Any] = {}
     preferences_store = preferences_store or store
+    if action == "check-updates":
+        return check_plugin_updates(request, store, current_time, generation)
     if action in {"diagnostics", "clear-previews"}:
         cleared = preview_cache_summary(store, clear=True) if action == "clear-previews" else None
         return {"ok": True, "action": action, "generation": generation,
@@ -5751,6 +6652,8 @@ def run(
     except ValueError as preferences_error:
         preferences = dict(DEFAULT_PREFERENCES)
         error = str(preferences_error)
+    if action == "update-plugin":
+        return execute_plugin_update(request, store, current_time, generation, preferences, phase)
     if action in {"context", "save-interests", "preview-interest", "matches", "review-matches"}:
         if error:
             raise ValueError(error)
@@ -5773,6 +6676,7 @@ def run(
             catalog, _fetched, revision = load_catalog(store)
             thumbnails = materialize_thumbnails(
                 store, [item for item in catalog if item["id"] in ids], revision,
+                allow_readme=preferences["readmeEnrichment"],
             )
         return {"ok": True, "action": action, "generation": generation, "thumbnails": thumbnails}
     if action == "save-preferences":
@@ -6318,8 +7222,11 @@ def run(
                     "documentSource": readme_source(document.get("documentSource")),
                     "fetchedAt": current_time,
                 }
-                save_readmes(store, readmes)
+                # Another helper may have fetched a newer catalog revision while
+                # this request was in flight. Keep its disk entry, but render only
+                # the document fetched for this request's pinned target.
                 cached = readmes[readme_plugin_id]
+                readmes = save_readmes(store, {readme_plugin_id: cached})
                 readmes_fetched = 1
         readme_content = clean(cached.get("content"), MAX_README_TEXT) if cached else ""
         if cached and cached.get("documentVersion") == README_DOCUMENT_VERSION:
@@ -6443,16 +7350,11 @@ def process_request(
 
 def read_request(stream: Any) -> bytes:
     raw = stream.readline(MAX_REQUEST_BYTES + 1)
-    if len(raw) > MAX_REQUEST_BYTES and not raw.endswith(b"\n"):
-        while True:
-            remainder = stream.readline(MAX_REQUEST_BYTES + 1)
-            if not remainder or remainder.endswith(b"\n"):
-                break
     return raw
 
 
 def write_response(result: dict[str, Any]) -> None:
-    output = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode(
+    output = json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode(
         "utf-8", "backslashreplace",
     )
     if len(output) > MAX_OUTPUT_BYTES:
@@ -6501,6 +7403,8 @@ def serve() -> int:
                 result = error_response(error, request)
             _terminate_all()
             write_response(result)
+            if len(raw) > MAX_REQUEST_BYTES and not raw.endswith(b"\n"):
+                return 1  # Do not drain an unbounded, unterminated request.
     finally:
         _terminate_all()
         if store is not None: store.close()

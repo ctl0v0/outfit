@@ -23,6 +23,108 @@ Item {
   readonly property string configRoot: (demoRoot ? demoRoot + "/config" : MediaPaths.xdg(Quickshell.env("XDG_CONFIG_HOME"), Quickshell.env("HOME"), ".config")) + "/io.github.ctl0v0.outfit"
   readonly property string cacheRoot: (demoRoot ? demoRoot + "/cache" : MediaPaths.xdg(Quickshell.env("XDG_CACHE_HOME"), Quickshell.env("HOME"), ".cache")) + "/io.github.ctl0v0.outfit"
   readonly property string batchJournalPath: configRoot + "/quick-setup.json"
+  property bool sleeping: false
+  property bool presentationPaused: false
+  property int sleepDelay: 30000
+  property real closedAt: 0
+  property bool queryStopping: false
+  property bool wakeRequested: false
+  property bool startupResumeNeeded: false
+  property int queryOutputSize: 0
+  property int queryOutputLines: 0
+  property string thumbnailDemandKey: ""
+  readonly property bool sleepBlocked: root.mutationBusy || root.hasCheckingOperations()
+    || root.pluginOpenBusy || Boolean(root.editorRestorePayload) || root.hostLeaseCleanup.length > 0
+    || hostLifecycleWorker.active || root.hostLeaseToken !== "" || root.hostPollDeadline > 0
+    || (root.requestActive && !root.presentationAction(root.activeAction))
+    || (root.densitySavePending && !root.densitySaveError)
+  function presentationAction(action) {
+    return ["load", "search", "quick-setup", "readme-plugin", "context", "preview-interest", "matches", "discover"].indexOf(action) >= 0
+  }
+  function scheduleSleep() {
+    if (root.editorOpen || root.sleeping || root.sleepBlocked) { idleSleep.stop(); return }
+    idleSleep.interval = Math.max(1, root.closedAt + root.sleepDelay - Date.now())
+    idleSleep.restart()
+  }
+  function stopQueryForIdle() {
+    if (root.requestActive && !root.presentationAction(root.activeAction)) return false
+    deadline.stop()
+    queryLaunchDeadline.stop()
+    queryEofGrace.stop()
+    root.queryStopping = worker.running || worker.processId > 0 || root.queryLaunching
+    root.queryLaunching = false
+    root.requestActive = false
+    root.activeAction = ""
+    root.activeRequest = ({})
+    root.response = null
+    root.streamFinished = false
+    root.generation++
+    worker.running = false
+    if (root.queryStopping) hardStop.restart()
+    return true
+  }
+  function enterSleep() {
+    if (root.editorOpen || root.sleepBlocked) return false
+    root.presentationPaused = true
+    root.sleeping = true
+    root.pendingSearch = null
+    root.pendingSetup = null
+    root.pendingReadmeId = ""
+    root.pendingDiscovery = null
+    root.pendingAnalyze = false
+    root.stopQueryForIdle()
+    thumbnailLoader.clear()
+    root.thumbnailRows = []
+    root.thumbnailDemandKey = ""
+    root.rows = []
+    root.setupRows = []
+    root.setupSections = []
+    root.discoveryRows = []
+    root.discoveryHistory = []
+    root.matches = {rows:[],total:0,unread:0,page:1,pageCount:1,partial:false}
+    root.matchesLoaded = false
+    root.readmeContent = ""
+    root.readmeBlocks = []
+    root.readmeMedia = []
+    root.readmeMediaIndexed = false
+    root.readmePluginId = ""
+    root.readmeIdentity = ""
+    root.diagnostics = ({})
+    root.cacheLoaded = false
+    root.inventoryReady = false
+    root.hasAnalyzed = false
+    root.startupStarted = false
+    root.startupResumeNeeded = false
+    root.searchPreparationAttempted = false
+    root.searchPreparationSettled = false
+    root.response = null
+    root.mutationResponse = null
+    root.persistBatchJournal()
+    return true
+  }
+  function resumeQueries() {
+    if (root.queryStopping || !root.editorOpen) return
+    if (!root.cacheLoaded) {
+      root.wakeRequested = false
+      root.request("load", {})
+    } else if (!root.requestActive) {
+      root.wakeRequested = false
+      if (root.pendingSetup) {
+        var pending = root.pendingSetup
+        root.pendingSetup = null
+        root.request("quick-setup", pending)
+      } else if (root.pendingSearch) {
+        var search = root.pendingSearch
+        root.pendingSearch = null
+        root.search(search.query,search.category,search.installFilter,search.partyFilter)
+      } else if (root.pendingReadmeId) {
+        root.startReadme(root.pendingReadmeId)
+      } else root.queueBoardRefresh()
+      root.startStartup()
+    }
+  }
+  onSleepBlockedChanged: root.scheduleSleep()
+  Timer { id: idleSleep; objectName: "idleSleep"; interval: root.sleepDelay; onTriggered: root.enterSleep() }
 
   property var rows: []
   property var profile: []
@@ -31,6 +133,153 @@ Item {
   property string scanError: ""
   property var installed: []
   property var inventory: []
+  property var updates: []
+  property bool updatesLoaded: false
+  property real updatesCheckedAt: 0
+  property real nextUpdatesCheckAt: 0
+  property string updatesError: ""
+  readonly property bool updatesBusy: updatesWorker.active
+  readonly property int updatesUnavailableCount: updates.filter(function(row) {
+    return row.state === "unavailable" || Boolean(row.checkError)
+  }).length
+  readonly property int availableUpdateCount: updates.filter(function(row) {
+    return row.state === "available" && (row.canUpdate === true || row.selfUpdate === true)
+  }).length
+  property var selfUpdateState: ({state:"idle", message:""})
+  readonly property bool selfUpdatePending: ["queued", "validating", "checking", "updating", "verified", "restarting", "reopening", "unconfirmed"].indexOf(String(selfUpdateState.state)) >= 0
+  readonly property bool selfUpdateBusy: selfUpdatePending || (selfUpdateWorker.active && selfUpdateWorker.activeRequest.action === "self-update")
+  property real selfUpdatePollDeadline: 0
+  property bool selfUpdateStatusLoaded: false
+
+  function updateInfo(identity) {
+    for (var row of root.updates) if (row.id === String(identity)) return row
+    return null
+  }
+  function checkUpdates(force) {
+    if (!root.inventoryReady || root.mutationBusy || root.hasCheckingOperations() || root.updatesBusy) return false
+    if (force !== true && Date.now() < root.nextUpdatesCheckAt) return false
+    return updatesWorker.submit("check-updates", {force:force === true,
+      inventoryRevision:root.inventoryRevision, mutationGeneration:root.mutationGeneration})
+  }
+  function finishUpdates(result, request) {
+    if (result && result.cancelled) return
+    if (request.inventoryRevision !== root.inventoryRevision
+        || request.mutationGeneration !== root.mutationGeneration || root.mutationBusy) {
+      root.nextUpdatesCheckAt = 0
+      return
+    }
+    if (!result || result.ok !== true || result.inventoryAuthoritative !== true || !Array.isArray(result.updates)) {
+      root.updatesError = String(result && (result.updatesError || result.error) || "Could not check plugin updates.").slice(0, 300)
+      root.nextUpdatesCheckAt = Date.now() + 300000
+      return
+    }
+    root.updates = result.updates.slice(0, 2000)
+    root.updatesLoaded = true
+    root.updatesCheckedAt = Number(result.updatesCheckedAt) || 0
+    root.updatesError = String(result.updatesError || "").slice(0, 300)
+    // Merge only version facts from this generation; do not publish an older
+    // inventory over a management operation or a newer scan.
+    if (Array.isArray(result.inventory)) root.inventory = result.inventory
+    var oldest = root.updates.reduce(function(value, row) {
+      return Math.min(value, Number(row.checkedAt) || value)
+    }, Date.now() / 1000)
+    root.nextUpdatesCheckAt = root.updatesError || root.updatesUnavailableCount > 0 ? Date.now() + 300000
+      : Math.max(Date.now() + 60000, oldest * 1000 + 21600000)
+  }
+  function invalidateUpdate(identity) {
+    root.updates = root.updates.map(function(row) {
+      if (row.id !== identity) return row
+      return Object.assign({}, row, {state:"unavailable", canUpdate:false,
+        reason:"Plugin state changed. Check for updates again."})
+    })
+    root.nextUpdatesCheckAt = 0
+  }
+  function updatePlugin(row, resumeState) {
+    if (!row || root.mutationBusy || root.updatesBusy || root.hasCheckingOperations()
+        || !root.inventoryReady || !InspectorState.eligibleUpdate(row)
+        || !InspectorState.sameUpdate(row, root.updateInfo(row.id))) return false
+    return root.startPluginAction("update-plugin", row.id, resumeState, "", false, false, "", row)
+  }
+  function startUpdateBatch(ids, resumeState) {
+    if (root.mutationBusy || root.updatesBusy || root.hasCheckingOperations() || !root.inventoryReady) return false
+    var wanted = Array.isArray(ids) ? ids : []
+    var selected = root.updates.filter(function(row) {
+      return InspectorState.eligibleUpdate(row) && (!wanted.length || wanted.indexOf(row.id) >= 0)
+    })
+    if (!selected.length || selected.length > 2000 || (wanted.length && selected.length !== wanted.length)) return false
+    root.batchKind = "update"
+    root.batchItems = selected.map(function(row) {
+      return {id:row.id, name:row.name, kind:"update", expectedRevision:row.availableRevision,
+        expectedInstalledRevision:row.installedRevision, installedVersion:row.installedVersion,
+        availableVersion:row.availableVersion, status:"queued", message:"Waiting", attempts:0}
+    })
+    root.batchCurrentIndex = -1
+    root.batchStopRequested = false
+    root.batchRecovered = false
+    root.batchCloseSuppressed = false
+    root.editorRestoreSuppressed = false
+    root.batchResumePayload = root.safeEditorPayload(resumeState, "")
+    root.beginBatchLifecycle(selected.map(function(item) { return String(item.id) }))
+    root.batchRunning = true
+    root.prepareEditorRestore(root.batchResumePayload, "")
+    root.scheduleBatchAdvance(600)
+    return true
+  }
+  function beginSelfUpdate(row, resumeState) {
+    if (!row || row.selfUpdate !== true || row.state !== "available" || root.interestsDirty
+        || (resumeState && resumeState.settingsTouched) || root.mutationBusy || root.updatesBusy
+        || root.hasCheckingOperations() || !root.inventoryReady || selfUpdateWorker.active
+        || !InspectorState.sameUpdate(row, root.updateInfo(row.id))) return false
+    var started = selfUpdateWorker.submit("self-update", {expectedRevision:row.availableRevision,
+      expectedInstalledRevision:row.installedRevision, resumePayload:root.safeEditorPayload(resumeState, "")})
+    if (started) {
+      root.selfUpdateState = {state:"validating", message:"Preparing Outfit update. The shell will restart and Outfit will reopen."}
+      root.selfUpdatePollDeadline = Date.now() + 310000
+    }
+    return started
+  }
+  function finishSelfUpdate(result, request) {
+    root.selfUpdateStatusLoaded = true
+    if (result && result.responseKind === "self-update" && result.state) {
+      root.selfUpdateState = result.state === "idle" ? {state:"idle", message:""} : result
+      if (root.selfUpdatePending && !root.selfUpdatePollDeadline) root.selfUpdatePollDeadline = Date.now() + 310000
+    } else if (request.action === "self-update") {
+      root.selfUpdateState = {state:"unconfirmed", message:"Self-update launch was not confirmed. Checking its independent worker…"}
+    }
+  }
+  BackgroundWorker {
+    id: updatesWorker
+    objectName: "updatesJobs"
+    helperPath: root.helperPath
+    lowPriority: true
+    onFinished: function(result, request) { root.finishUpdates(result, request) }
+  }
+  BackgroundWorker {
+    id: selfUpdateWorker
+    objectName: "selfUpdateJobs"
+    helperPath: root.helperPath
+    onFinished: function(result, request) { root.finishSelfUpdate(result, request) }
+  }
+  Timer {
+    interval: Math.max(3000,Math.min(21600000,root.nextUpdatesCheckAt - Date.now()))
+    repeat: true
+    running: root.editorOpen && root.cacheLoaded && root.inventoryReady && !root.updatesBusy && !root.mutationBusy
+    onTriggered: {
+      if (!root.selfUpdateStatusLoaded && !selfUpdateWorker.active)
+        selfUpdateWorker.submit("self-update-status", {})
+      root.checkUpdates(false)
+    }
+  }
+  Timer {
+    interval: 1500
+    repeat: true
+    running: root.selfUpdatePending
+    onTriggered: {
+      if (root.selfUpdatePollDeadline > 0 && Date.now() > root.selfUpdatePollDeadline) {
+        root.selfUpdateState = {state:"expired", message:"Self-update could not be confirmed. Check the installed version before retrying."}
+      } else if (!selfUpdateWorker.active) selfUpdateWorker.submit("self-update-status", {})
+    }
+  }
   property var unavailable: []
   property var categories: []
   property var preferences: ({
@@ -165,8 +414,18 @@ Item {
       root.refreshCatalog(true)
       if (root.preferences.watchHardware !== false && !root.hasAnalyzed) root.analyze()
       else root.setActivity("hardware", {state:root.hasAnalyzed ? "complete" : "disabled"})
+    } else if (root.startupResumeNeeded) {
+      root.startupResumeNeeded = false
+      if (!root.inventoryReady && !inventoryWorker.active) root.startInventoryCheck()
+      if (root.startupActivity.catalog.state === "waiting" && !catalogWorker.active) root.refreshCatalog(true)
+      if (root.startupActivity.hardware.state === "waiting" && !root.backgroundBusy
+          && root.preferences.watchHardware !== false) root.analyze()
     }
     return true
+  }
+  function resumeStartupLater() {
+    root.startupResumeNeeded = true
+    if (root.editorOpen) Qt.callLater(root.startStartup)
   }
   function startInventoryCheck() {
     if (root.mutationBusy || inventoryWorker.active) return false
@@ -178,6 +437,7 @@ Item {
   function finishStartupInventory(result, request) {
     if (result && result.cancelled) {
       root.setActivity("inventory", {state:root.inventoryReady ? "complete" : "waiting"})
+      root.resumeStartupLater()
       return
     }
     if (root.mutationBusy || request.inventoryRevision !== root.inventoryRevision
@@ -209,7 +469,7 @@ Item {
     return started
   }
   function finishCatalog(result, request) {
-    if (result && result.cancelled) { root.setActivity("catalog", {state:"waiting"}); return }
+    if (result && result.cancelled) { root.setActivity("catalog", {state:"waiting"}); root.resumeStartupLater(); return }
     if (!result || result.ok !== true) { root.setActivity("catalog", {state:"error"}); return }
     if ("catalogCount" in result) root.catalogCount = Math.max(0, Number(result.catalogCount) || 0)
     if (Array.isArray(result.categories)) root.categories = result.categories
@@ -339,9 +599,10 @@ Item {
   Timer {
     id: searchPreparationDelay
     objectName: "searchPreparationDelay"
-    interval: 750
+    interval: Math.max(750,Math.min(300000,root.nextSearchPreparationAt - Date.now()))
     repeat: true
     running: root.editorOpen && root.startupStarted && root.indexingEnabled && !root.searchPreparationSettled
+      && !root.preparingSearch && !root.catalogBusy && !root.mutationBusy
     onTriggered: root.tryPrepareSearch()
   }
   BackgroundWorker {
@@ -378,9 +639,12 @@ Item {
   Timer {
     id: indexingDelay
     objectName: "indexingDelay"
-    interval: 3000
+    interval: Math.max(3000,Math.min(21600000,root.nextIndexAt - Date.now()))
     repeat: true
-    running: root.editorOpen && root.indexingEnabled
+    running: root.editorOpen && root.indexingEnabled && root.searchPreparationSettled
+      && !root.indexingBusy && !root.preparingSearch && !root.mutationBusy && !root.backgroundBusy
+      && (root.indexedCatalogRevision !== root.generatedAt || !root.readmeIndex.eligible
+        || root.readmeIndex.due > 0 || root.readmeIndex.pending > 0 || root.readmeIndex.failed > 0)
     onTriggered: root.tryIndexReadmes()
   }
   function tryIndexReadmes() {
@@ -432,13 +696,16 @@ Item {
     return true
   }
   onMutationBusyChanged: if (root.mutationBusy) {
+    updatesWorker.stop("Update check yielded to plugin changes.", true)
     readmeIndexer.stop("README indexing yielded to plugin changes.", true)
     searchPreparationWorker.stop("Documentation preparation yielded to plugin changes.", true)
     inventoryWorker.stop("Inventory check yielded to plugin changes.", true)
-  }
+  } else if (root.editorOpen && root.startupResumeNeeded) Qt.callLater(root.startStartup)
   onBackgroundBusyChanged: if (root.backgroundBusy) readmeIndexer.stop("README indexing yielded to maintenance.", true)
   onGeneratedAtChanged: { root.nextIndexAt = 0; root.catalogMatchesChanged() }
   property string readmePluginId: ""
+  property string readmeIdentity: ""
+  property string requestedReadmeIdentity: ""
   property string readmeContent: ""
   property var readmeBlocks: []
   property var readmeMedia: []
@@ -446,12 +713,18 @@ Item {
   readonly property var thumbnails: thumbnailLoader.images
   property bool readmeMediaIndexed: false
   function setThumbnailRows(rows) {
-    root.thumbnailRows = Array.isArray(rows) ? rows.slice(0, 72) : []
+    var next = Array.isArray(rows) && !root.sleeping ? rows.slice(0,72) : []
+    var key = JSON.stringify(next.map(function(row) { return [row.id, row.previewThumbnail || row.previewImage || "", row.repo || "", row.listingCommit || ""] }))
+    if (key === root.thumbnailDemandKey) return
+    root.thumbnailDemandKey = key
+    root.thumbnailRows = next
   }
+  function invalidateThumbnail(identity, source) { return thumbnailLoader.invalidateImage(identity, source) }
 
   ThumbnailLoader {
     id: thumbnailLoader
     helperPath: root.helperPath
+    readmeFallbackEnabled: root.preferences.readmeEnrichment !== false
     revision: root.generatedAt
     rows: root.thumbnailRows
     enabled: root.editorOpen && root.preferences.marketplaceThumbnails !== false
@@ -576,7 +849,7 @@ Item {
       root.pendingMatchReview = null
     }
     if (!root.editorOpen || !root.cacheLoaded) return false
-    if (root.requestActive || root.mutationBusy) { interestsDelay.restart(); return false }
+    if (root.queryBusy || root.mutationBusy) { interestsDelay.restart(); return false }
     var payload = root.contextPayload()
     if (root.pendingContext || !root.inputsLoaded) {
       root.pendingContext = false
@@ -947,7 +1220,11 @@ Item {
   }
   function flushDensitySave() {
     if (!root.densitySavePending || root.densitySaveError) return false
-    if (!root.cacheLoaded || root.requestActive || root.mutationBusy || root.pendingSetup
+    if (!root.cacheLoaded && root.presentationPaused) {
+      root.densitySaveError = "Browse view is applied but could not be saved. Select it again to retry."
+      return false
+    }
+    if (!root.cacheLoaded || root.queryBusy || root.mutationBusy || root.pendingSetup
         || root.pendingSearch || root.pendingReadmeId || root.boardRefreshPending) {
       densitySaveDelay.restart()
       return false
@@ -1079,6 +1356,7 @@ Item {
     var scanning = request.action === "analyze" || request.action === "rescan"
     if (result && result.cancelled === true) {
       root.setActivity(scanning ? "hardware" : "catalog", {state:"waiting"})
+      root.resumeStartupLater()
       return
     }
     if (!result || result.ok !== true) {
@@ -1138,7 +1416,7 @@ Item {
     }
     if (root.setupRequested || root.editorOpen) {
       root.boardRefreshPending = true
-      root.queueBoardRefresh()
+      if (!root.presentationPaused) root.queueBoardRefresh()
     }
     if (root.editorOpen && root.workspaceView === "discover") root.ensureDiscovery()
   }
@@ -1177,6 +1455,7 @@ Item {
   property bool setupServicesInitialized: false
   property var setupSelection: ({})
   property var batchItems: []
+  property string batchKind: "install"
   property int batchCurrentIndex: -1
   property bool batchRunning: false
   property bool batchStopRequested: false
@@ -1295,7 +1574,7 @@ Item {
     root.hostLifecycleError = ""
     root.hostLifecycleSnapshot = ({})
     root.hostRuntimeResults = ({})
-    root.hostLifecycleAffectedIds = ids.slice(0, 50)
+    root.hostLifecycleAffectedIds = ids.slice(0, root.batchKind === "update" ? 2000 : 50)
     root.hostMutationSerial++
     root.hostSnapshotMutationSerial = -1
     root.hostTargetGeneration = 0
@@ -1510,18 +1789,23 @@ Item {
   }
   function publishHostRuntime(fallback) {
     var results = JSON.parse(JSON.stringify(root.hostRuntimeResults))
+    var items = root.batchItems.slice(), byId = ({}), changed = false
+    for (var itemIndex = 0; itemIndex < items.length; itemIndex++) byId[items[itemIndex].id] = itemIndex
     for (var i = 0; i < root.hostLifecycleAffectedIds.length; i++) {
       var identity = root.hostLifecycleAffectedIds[i]
       if (fallback) results[identity] = fallback
       var runtime = results[identity]
       if (!runtime) continue
-      for (var j = 0; j < root.batchItems.length; j++) {
-        var item = root.batchItems[j]
-        if (item.id !== identity || ["completed", "skipped"].indexOf(item.status) < 0) continue
+      var j = byId[identity]
+      if (j !== undefined) {
+        var item = items[j]
+        if (["completed", "skipped"].indexOf(item.status) < 0) continue
         var message = String(item.message || "").split("\nRuntime:")[0]
-        root.replaceBatchItem(j, {message:(message + "\nRuntime: " + runtime.message).slice(0, 240)})
+        var nextMessage = (message + "\nRuntime: " + runtime.message).slice(0,240)
+        if (nextMessage !== item.message) { items[j] = Object.assign({},item,{message:nextMessage}); changed = true }
       }
     }
+    if (changed) { root.batchProgressOnly = true; root.batchItems = items; root.batchProgressOnly = false }
     root.hostRuntimeResults = results
   }
   function noteHostMutation(identity) {
@@ -1582,14 +1866,14 @@ Item {
   property bool timedOut: false
   property int processExitCode: 0
   property var response: null
-  readonly property bool queryBusy: requestActive
-  readonly property bool mutationBusy: mutationActive || mutationQueue.length > 0 || batchRunning
+  readonly property bool queryBusy: requestActive || queryStopping
+  readonly property bool mutationBusy: mutationActive || mutationQueue.length > 0 || batchRunning || selfUpdateBusy
   readonly property bool busy: queryBusy || mutationBusy
   readonly property string visibleAction: mutationActive ? mutationAction : activeAction
 
   function request(action, values) {
     if (!root.discoveryEnabled && ["discover", "matches", "review-matches"].indexOf(action) >= 0) return false
-    if (root.requestActive) return false
+    if (root.requestActive || root.queryStopping || (root.sleeping && action !== "load")) return false
     var payload = values ? JSON.parse(JSON.stringify(values)) : ({})
     root.generation++
     payload.action = String(action || "")
@@ -1604,6 +1888,9 @@ Item {
     root.timedOut = false
     root.processExitCode = 0
     root.response = null
+    root.queryOutputSize = 0
+    root.queryOutputLines = 0
+    queryParser.reset()
     if (["save-density", "context", "save-interests", "preview-interest", "matches", "review-matches"].indexOf(action) < 0) {
       root.error = ""
       root.notice = ""
@@ -1642,7 +1929,7 @@ Item {
       ? nextInstallFilter : "all"
     root.currentPartyFilter = ["all", "first-party", "third-party"].indexOf(nextPartyFilter) >= 0
       ? nextPartyFilter : "all"
-    if (root.requestActive) {
+    if (root.requestActive || root.queryStopping) {
       root.pendingSearch = ({
         query: root.currentQuery,
         category: root.currentCategory,
@@ -1750,7 +2037,7 @@ Item {
       setupVerification: root.setupVerification,
       boardKey: root.boardRevisionKey()
     })
-    if (root.requestActive) {
+    if (root.requestActive || root.queryStopping) {
       root.pendingSetup = payload
       return true
     }
@@ -1863,7 +2150,12 @@ Item {
   property var pluginOpenRequest: null
   property var pluginOpenResult: null
   onSetupDetailIdChanged: { root.pluginOpenSelectionSerial++; root.pluginOpenResult = null }
-  onEditorOpenChanged: { root.pluginOpenSelectionSerial++; root.pluginOpenResult = null }
+  onEditorOpenChanged: {
+    root.pluginOpenSelectionSerial++
+    root.pluginOpenResult = null
+    if (root.editorOpen) idleSleep.stop()
+    else { root.closedAt = Date.now(); root.scheduleSleep() }
+  }
 
   BackgroundWorker {
     id: pluginOpenWorker
@@ -2029,6 +2321,7 @@ Item {
       desiredInstalled: null,
       desiredEnabled: null,
       desiredSection: "",
+      desiredRevision: "",
       commandFailed: false,
       commandError: "",
       partialOutcome: false,
@@ -2063,6 +2356,7 @@ Item {
       desiredInstalled: null,
       desiredEnabled: null,
       desiredSection: "",
+      desiredRevision: "",
       commandFailed: false,
       commandError: "",
       partialOutcome: false,
@@ -2076,6 +2370,8 @@ Item {
 
   function desiredPluginStateObserved(pluginId) {
     var operation = root.pluginOperation(pluginId)
+    if (operation.desiredRevision && (!root.inventoryEntry(pluginId)
+        || root.inventoryEntry(pluginId).installedRevision !== operation.desiredRevision)) return false
     if (typeof operation.desiredInstalled === "boolean"
         && operation.desiredInstalled !== root.isInstalled(pluginId)) return false
     if (typeof operation.desiredEnabled === "boolean"
@@ -2176,6 +2472,8 @@ Item {
         continue
       }
       var observed = action === "remove-plugin" ? !local
+        : action === "update-plugin" ? Boolean(local && local.installedRevision === previous.expectedRevision
+          && enabled === previous.wasEnabled && sectionMatches)
         : action === "disable-plugin" ? !enabled
         : action === "install-plugin" ? Boolean(local && enabled === (previous.enableAfter === true || Boolean(previous.barSection)) && sectionMatches)
         : action === "enable-plugin" || action === "place-plugin" ? enabled && sectionMatches : false
@@ -2304,6 +2602,16 @@ Item {
       reviewedRevision: /^[0-9a-f]{40}$/.test(String(value.reviewedRevision || ""))
         ? String(value.reviewedRevision) : ""
     }
+    item.kind = value.kind === "update" ? "update" : "install"
+    if (item.kind === "update") {
+      if (identity === "io.github.ctl0v0.outfit" || identity === "io.github.ctl0v0.omafit"
+          || !/^[0-9a-f]{40}$/.test(String(value.expectedRevision || ""))
+          || !/^[0-9a-f]{40}$/.test(String(value.expectedInstalledRevision || ""))) return null
+      item.expectedRevision = String(value.expectedRevision)
+      item.expectedInstalledRevision = String(value.expectedInstalledRevision)
+      item.installedVersion = String(value.installedVersion || "").slice(0, 64)
+      item.availableVersion = String(value.availableVersion || "").slice(0, 64)
+    }
     if (withStatus === true) {
       var status = String(value.status || "queued")
       if (["queued", "running", "completed", "partial", "failed", "skipped"].indexOf(status) < 0)
@@ -2319,6 +2627,7 @@ Item {
 
   function persistBatchJournal() {
     if (!root.batchJournalLoaded) return
+    journalWriteDelay.stop()
     var selection = []
     var selected = root.selectedSetupRows()
     for (var selectedIndex = 0; selectedIndex < selected.length && selectedIndex < 50; selectedIndex++) {
@@ -2326,17 +2635,21 @@ Item {
       if (safeSelection) selection.push(safeSelection)
     }
     var items = []
-    for (var itemIndex = 0; itemIndex < root.batchItems.length && itemIndex < 50; itemIndex++) {
+    for (var itemIndex = 0; itemIndex < root.batchItems.length && itemIndex < (root.batchKind === "update" ? 2000 : 50); itemIndex++) {
       var safeItem = root.safeBatchItem(root.batchItems[itemIndex], true)
       if (safeItem) items.push(safeItem)
     }
-    batchJournal.setText(JSON.stringify({
+    var text = JSON.stringify({
       schema: 1,
+      kind: root.batchKind,
       selection: selection,
       items: items,
       running: root.batchRunning,
       resumePayload: root.batchResumePayload
-    }))
+    })
+    if (text === root.lastBatchJournalText) return
+    root.lastBatchJournalText = text
+    batchJournal.setText(text)
     journalPermissionDelay.restart()
   }
 
@@ -2344,7 +2657,7 @@ Item {
     var parsed = null
     try {
       var text = String(raw || "")
-      if (text.length > 128 * 1024) throw new Error("journal too large")
+        if (text.length > 2 * 1024 * 1024) throw new Error("journal too large")
       parsed = JSON.parse(text)
     } catch (error) {
       parsed = null
@@ -2360,9 +2673,9 @@ Item {
       }
       var savedItems = Array.isArray(parsed.items) ? parsed.items : []
       wasRunning = parsed.running === true
-      for (var itemIndex = 0; itemIndex < savedItems.length && itemIndex < 50; itemIndex++) {
+      for (var itemIndex = 0; itemIndex < savedItems.length && itemIndex < (parsed.kind === "update" ? 2000 : 50); itemIndex++) {
         var safeItem = root.safeBatchItem(savedItems[itemIndex], true)
-        if (!safeItem) continue
+        if (!safeItem || safeItem.kind !== (parsed.kind === "update" ? "update" : "install")) continue
         if (wasRunning && safeItem.status === "running") {
           safeItem.status = "partial"
           safeItem.message = "Interrupted by a shell restart; verify the result and retry."
@@ -2371,6 +2684,7 @@ Item {
       }
     }
     root.setupSelection = selection
+    root.batchKind = parsed && parsed.kind === "update" ? "update" : "install"
     root.batchItems = items
     root.batchCurrentIndex = -1
     root.batchRunning = false
@@ -2415,6 +2729,7 @@ Item {
     root.mutationTimedOut = false
     root.mutationProcessExitCode = 0
     root.mutationResponse = null
+    mutationParser.reset()
     root.mutationProgressEvents = 0
     root.mutationProgressSequence = 0
     mutationEofGrace.stop()
@@ -2427,8 +2742,9 @@ Item {
   }
 
   function startPluginAction(
-      action, identity, resumeState, barSection, enableAfter, batchItem, reviewedRevision) {
+      action, identity, resumeState, barSection, enableAfter, batchItem, reviewedRevision, update) {
     if (!root.inventoryReady) { root.error = "Wait for a successful inventory scan before changing plugins."; return false }
+    if (root.selfUpdateBusy) return false
     if (root.batchRunning && batchItem !== true) return false
     var values = ({
       profile: root.profile,
@@ -2447,11 +2763,28 @@ Item {
     if (batchItem === true) values.batchItem = true
     if (/^[0-9a-f]{40}$/.test(String(reviewedRevision || "")))
       values.reviewedRevision = String(reviewedRevision)
+    if (action === "update-plugin") {
+      var localUpdate = root.inventoryEntry(identity)
+      if (!localUpdate || !update || identity === "io.github.ctl0v0.outfit"
+          || !/^[0-9a-f]{40}$/.test(String(update.availableRevision || update.expectedRevision || ""))
+          || !/^[0-9a-f]{40}$/.test(String(update.installedRevision || update.expectedInstalledRevision || ""))) return false
+      values.expectedRevision = String(update.availableRevision || update.expectedRevision)
+      values.expectedInstalledRevision = String(update.expectedInstalledRevision || update.installedRevision)
+      values.wasEnabled = localUpdate.enabled === true
+      values.barSection = String(localUpdate.barSection || "")
+    }
     if (!root.beginPluginOperation(action, identity, values.barSection || "", enableAfter))
       return false
     root.setPluginOperation(identity, {lastAction:action, lastRequest:{action:action, pluginId:identity,
       barSection:String(values.barSection || ""), enableAfter:enableAfter === true,
-      batchItem:batchItem === true, reviewedRevision:String(reviewedRevision || "")}})
+      batchItem:batchItem === true, reviewedRevision:String(reviewedRevision || ""),
+      expectedRevision:String(values.expectedRevision || ""), expectedInstalledRevision:String(values.expectedInstalledRevision || ""),
+      wasEnabled:values.wasEnabled === true}})
+    if (action === "update-plugin") {
+      root.setPluginOperation(identity, {desiredInstalled:true, desiredRevision:values.expectedRevision,
+        desiredEnabled:values.wasEnabled, desiredSection:values.barSection})
+      root.invalidateUpdate(identity)
+    }
     if (batchItem === true)
       root.setPluginOperation(identity, { batchIndex: root.batchCurrentIndex })
     var started = root.requestMutation(action, values)
@@ -2481,6 +2814,10 @@ Item {
     var local = root.inventoryEntry(row.id)
     if (previous.batchItem === true) return false
     var action = String(operation.lastAction || "")
+    if (action === "update-plugin") {
+      root.updatesError = "Check for updates and review the current version before retrying."
+      return root.checkUpdates(true)
+    }
     if (!local || !action) return root.verifyMutationState()
     if (action === "install-plugin") {
       var wantedEnabled = previous.enableAfter === true || Boolean(previous.barSection)
@@ -2509,13 +2846,16 @@ Item {
     var item = JSON.parse(JSON.stringify(next[index]))
     for (var key in values) item[key] = values[key]
     next[index] = item
+    root.batchProgressOnly = Object.keys(values).every(function(key) { return key === "message" || key === "phase" })
     root.batchItems = next
+    root.batchProgressOnly = false
   }
 
   function startSetupBatch(resumeState) {
     if (root.mutationBusy || !root.inventoryReady) return false
     var selected = root.selectedSetupRows()
     if (!selected.length || selected.length > 50) return false
+    root.batchKind = "install"
     root.batchCloseSuppressed = false
     root.editorRestoreSuppressed = false
     root.batchItems = selected.map(function(row) {
@@ -2568,9 +2908,30 @@ Item {
     }
 
     root.batchCurrentIndex = index
-    root.replaceBatchItem(index, { status: "running", message: "Installing" })
+    root.replaceBatchItem(index, { status: "running", message: root.batchKind === "update" ? "Updating" : "Installing" })
     var item = root.batchItems[index]
     var local = root.inventoryEntry(item.id)
+    if (item.kind === "update") {
+      if (!local) {
+        root.replaceBatchItem(index, {status:"skipped", message:"Plugin is no longer installed"})
+        root.batchCurrentIndex = -1
+        root.scheduleBatchAdvance(100)
+        return
+      }
+      if (local.installedRevision === item.expectedRevision) {
+        root.replaceBatchItem(index, {status:"completed", installedRevision:local.installedRevision,
+          message:"Reviewed revision is already installed"})
+        root.batchCurrentIndex = -1
+        root.scheduleBatchAdvance(100)
+        return
+      }
+      if (!root.startPluginAction("update-plugin", item.id, root.batchResumePayload, "", false, true, "", item)) {
+        root.replaceBatchItem(index, {status:"failed", message:"Could not start update. Check for updates and review again."})
+        root.batchCurrentIndex = -1
+        root.scheduleBatchAdvance(1000)
+      }
+      return
+    }
     var placementSatisfied = item.barWidget !== true || item.activate !== true
       || String(local && local.barSection || "") === String(item.barSection || "")
     if (local && (item.activate !== true || local.enabled === true) && placementSatisfied) {
@@ -2718,7 +3079,7 @@ Item {
     root.batchStopRequested = false
     root.batchResumePayload = null
     root.batchRecovered = false
-    root.setupSelection = ({})
+    if (root.batchKind !== "update") root.setupSelection = ({})
     return true
   }
 
@@ -2772,21 +3133,31 @@ Item {
     if (root.pendingReadmeId && root.pendingReadmeId !== identity)
       root.pendingReadmeId = ""
     root.requestedReadmeId = identity
+    root.requestedReadmeIdentity = identity + "|" + String(row.repo || "") + "|" + String(row.listingCommit || "")
+    if (root.readmeIdentity && root.readmeIdentity !== root.requestedReadmeIdentity) {
+      root.readmePluginId = ""
+      root.readmeContent = ""
+      root.readmeBlocks = []
+      root.readmeMedia = []
+      root.readmeMediaIndexed = false
+    }
     if (root.requestActive && root.activeAction === "readme-plugin"
-        && String(root.activeRequest.pluginId || "") === identity) return true
+        && String(root.activeRequest.pluginId || "") === identity
+        && root.activeRequest.readmeIdentity === root.requestedReadmeIdentity) return true
     if (!root.requestActive && root.readmePluginId === identity
-        && root.readmeMediaIndexed === true) return true
+        && root.readmeMediaIndexed === true && root.readmeIdentity === root.requestedReadmeIdentity) return true
     if (root.pendingReadmeId === identity) return true
     root.pendingReadmeId = identity
-    if (root.requestActive) return true
+    if (root.queryBusy) return true
     return root.startReadme(identity)
   }
 
   function startReadme(identity) {
     identity = String(identity || "")
-    if (!identity || identity !== root.requestedReadmeId || root.requestActive) return false
+    if (!identity || identity !== root.requestedReadmeId || root.queryBusy) return false
     root.pendingReadmeId = ""
     return request("readme-plugin", ({
+      readmeIdentity:root.requestedReadmeIdentity,
       profile: root.profile,
       installed: root.installed,
       inventory: root.inventory,
@@ -2821,6 +3192,19 @@ Item {
     }
   }
 
+  function safeUpdatesContext(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null
+    var expanded = ({})
+    var values = value.expanded && typeof value.expanded === "object" ? value.expanded : ({})
+    for (var key of Object.keys(values).slice(0,64))
+      if (/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(key) && ["constructor","prototype"].indexOf(key) < 0 && values[key] === true)
+        expanded[key] = true
+    return {y:Math.max(0,Math.min(1000000,Number(value.y) || 0)),
+      x:Math.max(0,Math.min(1000000,Number(value.x) || 0)), expanded:expanded,
+      id:String(value.id || "").slice(0,128), action:["details","update","explain"].indexOf(value.action) >= 0 ? value.action : "details",
+      anchor:value.anchor ? {id:String(value.anchor.id || "").slice(0,128),
+        offset:Math.max(-10000,Math.min(10000,Number(value.anchor.offset) || 0))} : null}
+  }
   function safeEditorPayload(value, selectedId) {
     var input = value && typeof value === "object"
       ? JSON.parse(JSON.stringify(value)) : ({})
@@ -2843,8 +3227,11 @@ Item {
     var category = "category" in input ? input.category : root.currentCategory
     return {
       view: ["fit", "setup"].indexOf(view) >= 0 ? view : "setup",
-      setupStage: ["services", "browse", "review", "progress"].indexOf(setupStage) >= 0
+      setupStage: ["services", "browse", "review", "progress", "updates"].indexOf(setupStage) >= 0
         ? setupStage : "browse",
+      updatesQuery: String(input.updatesQuery || "").slice(0, 160),
+      updatesScroll: Math.max(0, Math.min(1000000, Number(input.updatesScroll) || 0)),
+      updatesContext: root.safeUpdatesContext(input.updatesContext),
       setupQuery: String(setupQuery || "").slice(0, 160),
       setupGroup: String(setupGroup || "").slice(0, 40),
       setupGrouping: String(input.setupGrouping || root.setupGrouping) === "category" ? "category" : "none",
@@ -2976,22 +3363,46 @@ Item {
     }
   }
   function editorOpened() {
+    var waking = root.sleeping || root.queryStopping || !root.cacheLoaded
     root.editorOpen = true
+    root.presentationPaused = false
+    root.sleeping = false
+    if (waking) { root.wakeRequested = true; root.resumeQueries() }
     root.startStartup()
     root.requestContext()
     root.scheduleMatches(true)
   }
 
   function editorClosed() {
+    root.startupResumeNeeded = root.startupResumeNeeded || inventoryWorker.active || catalogWorker.active || backgroundWorker.active
+    root.presentationPaused = true
+    root.pendingSearch = null
+    root.pendingSetup = null
+    root.pendingDiscovery = null
+    root.pendingReadmeId = ""
+    root.pendingAnalyze = false
+    root.pendingInterestPreview = null
+    root.pendingMatches = false
+    root.pendingMatchReview = null
+    updatesWorker.stop("Update checks paused while Outfit is closed.",true)
+    catalogWorker.stop("Catalog work paused while Outfit is closed.",true)
+    inventoryWorker.stop("Startup inventory paused while Outfit is closed.",true)
+    backgroundWorker.stop("Optional work paused while Outfit is closed.",true)
     readmeIndexer.stop("README indexing paused while Outfit is closed.", true)
     searchPreparationWorker.stop("Documentation preparation paused while Outfit is closed.", true)
     root.editorOpen = false
+    if (root.requestActive && root.presentationAction(root.activeAction)) root.stopQueryForIdle()
     if (root.canBrowse && root.inventoryReady) root.startupQuiet = true
     root.thumbnailRows = []
+    root.thumbnailDemandKey = ""
     root.updateStatus = ""
     updateStatusExpiry.stop()
     root.pendingEnrichment = false
     interestsDelay.stop()
+    root.boardRefreshPending = false
+    if (root.densitySavePending) root.flushDensitySave()
+    root.persistBatchJournal()
+    root.scheduleSleep()
     if (["enrich", "refresh"].indexOf(root.backgroundAction) >= 0)
       backgroundWorker.stop("Marketplace refresh cancelled; cached results remain available.", true)
   }
@@ -3010,14 +3421,35 @@ Item {
   }
 
   function receiveOutput(raw) {
-    root.streamFinished = true
-    try {
-      var parsed = JSON.parse(String(raw || ""))
-      root.response = parsed && typeof parsed === "object" ? parsed : null
-    } catch (exception) {
-      root.response = null
+    if (!root.requestActive || root.streamFinished || root.queryStopping) return
+    var text = String(raw || "")
+    root.queryOutputSize += text.length
+    root.queryOutputLines++
+    if (text.length > 8 * 1024 * 1024 || root.queryOutputSize > 16 * 1024 * 1024 || root.queryOutputLines > 128) {
+      root.rejectQueryOutput("Local helper output exceeded its limit.")
+      return
     }
+    try {
+      var parsed = JSON.parse(text)
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+          || Number(parsed.generation) !== root.activeGeneration || parsed.action !== root.activeAction
+          || parsed.final === false || parsed.responseKind === "progress" || typeof parsed.ok !== "boolean") return
+      root.response = parsed
+    } catch (exception) {
+      return
+    }
+    root.streamFinished = true
     root.finishRequestIfReady()
+  }
+
+  function rejectQueryOutput(message) {
+    if (!root.requestActive || root.queryStopping) return
+    root.error = message
+    root.timedOut = true
+    root.streamFinished = true
+    root.response = null
+    worker.running = false
+    hardStop.restart()
   }
 
   function applyResponse(result, completedRequest) {
@@ -3031,11 +3463,14 @@ Item {
       if (["context", "save-interests", "preview-interest", "matches", "review-matches"].indexOf(completedRequest.action) >= 0)
         return root.applyInterestsResponse({ok:false,error:"Outfit returned a mismatched local result. Try again."}, completedRequest)
       root.error = "Outfit returned a mismatched query result."
+      if (completedRequest.action === "verify-inventory") root.reconciliationRequestFailed(root.error)
       return false
     }
     if (completedRequest.action === "readme-plugin"
-        && String(completedRequest.pluginId || "") !== root.requestedReadmeId)
+        && (String(completedRequest.pluginId || "") !== root.requestedReadmeId
+          || String(completedRequest.readmeIdentity || "") !== root.requestedReadmeIdentity))
       return true
+    if (completedRequest.action === "readme-plugin") root.readmeIdentity = String(completedRequest.readmeIdentity || "")
     if (["context", "save-interests", "preview-interest", "matches", "review-matches"].indexOf(completedRequest.action) >= 0)
       return root.applyInterestsResponse(result, completedRequest)
     if (completedRequest.action === "discover") {
@@ -3241,6 +3676,7 @@ Item {
     var completedResponse = root.response
     deadline.stop()
     hardStop.stop()
+    queryEofGrace.stop()
     if (completedRequest.action === "save-density") {
       var validDensityResult = !root.timedOut && completedResponse
         && completedResponse.action === "save-density"
@@ -3262,11 +3698,20 @@ Item {
       root.indexingPauseRequested = false
     root.activeAction = ""
     root.activeRequest = ({})
+    root.response = null
+    root.scheduleSleep()
     if (root.editorOpen && (root.pendingContext || root.pendingMatches || root.pendingMatchReview || root.pendingInterestPreview))
       interestsDelay.restart()
     root.dispatchMutation()
     if (root.hasCheckingOperations()) {
       root.scheduleOperationReconcile()
+    } else if (root.presentationPaused && !root.editorOpen) {
+      root.pendingSearch = null
+      root.pendingSetup = null
+      root.pendingReadmeId = ""
+      root.pendingAnalyze = false
+      if (root.densitySavePending) root.flushDensitySave()
+      return
     } else if (root.pendingAnalyze && !root.hasAnalyzed) {
       root.pendingAnalyze = false
       Qt.callLater(function() { root.analyze() })
@@ -3317,11 +3762,11 @@ Item {
             || (parsed.sequence !== undefined && (Number(parsed.sequence) <= root.mutationProgressSequence
               || !isFinite(Number(parsed.sequence))))
             || ["checking", "validating", "downloading", "installing", "enabling", "disabling", "removing",
-              "placing", "reloading", "verifying", "inventory", "install", "enable", "disable", "remove", "place"].indexOf(parsed.phase) < 0) return
+              "placing", "reloading", "verifying", "inventory", "install", "enable", "disable", "remove", "place", "updating"].indexOf(parsed.phase) < 0) return
         root.mutationProgressEvents++
         if (parsed.sequence !== undefined) root.mutationProgressSequence = Number(parsed.sequence)
         var phaseLabels = {checking:"Checking plugin state…", validating:"Validating plugin…", downloading:"Downloading plugin…",
-          installing:"Installing plugin…", enabling:"Enabling plugin…", disabling:"Disabling plugin…", removing:"Removing plugin…",
+          updating:"Updating plugin…", installing:"Installing plugin…", enabling:"Enabling plugin…", disabling:"Disabling plugin…", removing:"Removing plugin…",
           placing:"Moving widget…", reloading:"Waiting for Omarchy…", verifying:"Verifying plugin state…", inventory:"Checking installed plugins…"}
         var message = String(parsed.message || phaseLabels[parsed.phase] || "Updating plugin…").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 240)
         root.setPluginOperation(root.activeMutation.pluginId, {phase:parsed.phase, message:message})
@@ -3417,7 +3862,7 @@ Item {
   }
 
   function queueBoardRefresh() {
-    if (!root.cacheLoaded) return
+    if (!root.cacheLoaded || root.sleeping || (root.presentationPaused && !root.editorOpen)) return
     if (root.requestActive && root.activeAction === "quick-setup"
         && root.activeRequest.boardKey === root.boardRevisionKey() && !root.pendingSetup) {
       root.boardRefreshPending = false
@@ -3467,6 +3912,7 @@ Item {
     root.mutationActive = false
     root.mutationAction = ""
     root.activeMutation = ({})
+    root.invalidateUpdate(String(completedRequest.pluginId || ""))
     root.boardRefreshPending = true
     root.scheduleMatches(true)
     // Once runtime support is known, later individual actions must invalidate
@@ -3497,12 +3943,14 @@ Item {
         generation: completedRequest.generation,
         error: root.pluginError(completedRequest.pluginId)
       }))
-      root.finishBatchItem(batchResult)
+    root.finishBatchItem(batchResult)
     } else if (root.mutationQueue.length) {
       Qt.callLater(function() { root.dispatchMutation() })
     } else {
       Qt.callLater(function() { root.reconcileAfterMutations() })
     }
+    root.mutationResponse = null
+    root.scheduleSleep()
   }
 
   function validRepoUrl(value) {
@@ -3564,7 +4012,7 @@ Item {
     id: hardwareWatcher
     interval: 60000
     repeat: true
-    running: root.hasAnalyzed && root.preferences.watchHardware !== false
+    running: root.editorOpen && !root.sleeping && root.hasAnalyzed && root.preferences.watchHardware !== false
     onTriggered: root.rescan(true)
   }
 
@@ -3578,16 +4026,18 @@ Item {
 
   Timer {
     id: queryLaunchDeadline
+    objectName: "queryLaunchDeadline"
     interval: 2000
     onTriggered: {
       if (!root.queryLaunching || !root.requestActive) return
       root.queryLaunching = false
       root.processExitCode = -1
-      root.processExited = true
       root.streamFinished = true
       root.response = null
+      root.error = "Outfit's local helper could not start. Retry the action."
       if (worker.running) worker.running = false
-      root.finishRequestIfReady()
+      if (worker.processId > 0) { root.timedOut = true; hardStop.restart() }
+      else { root.processExited = true; root.finishRequestIfReady() }
     }
   }
 
@@ -3608,7 +4058,17 @@ Item {
   Timer {
     id: hardStop
     interval: 2000
-    onTriggered: if (worker.running) worker.signal(9)
+    onTriggered: {
+      if (worker.processId > 0) worker.signal(9)
+      else if (root.queryStopping) {
+        root.queryStopping = false
+        if (root.editorOpen) root.resumeQueries()
+      } else if (root.requestActive && root.timedOut) {
+        root.processExited = true
+        root.streamFinished = true
+        root.finishRequestIfReady()
+      }
+    }
   }
 
   Timer {
@@ -3618,11 +4078,14 @@ Item {
       if (!root.mutationLaunching || !root.mutationActive) return
       root.mutationLaunching = false
       root.mutationProcessExitCode = -1
-      root.mutationProcessExited = true
       root.mutationStreamFinished = true
       root.mutationResponse = null
       if (mutationWorker.running) mutationWorker.running = false
-      root.finishMutationIfReady()
+      if (mutationWorker.processId > 0) {
+        root.mutationTimedOut = true
+        root.failPluginMutation(root.activeMutation,"The plugin helper did not acknowledge startup; checking the result.")
+        mutationHardStop.restart()
+      } else { root.mutationProcessExited = true; root.finishMutationIfReady() }
     }
   }
 
@@ -3647,7 +4110,7 @@ Item {
   Timer {
     id: mutationHardStop
     interval: 2000
-    onTriggered: if (mutationWorker.running) mutationWorker.signal(9)
+    onTriggered: if (mutationWorker.processId > 0) mutationWorker.signal(9)
   }
 
   Timer {
@@ -3656,6 +4119,9 @@ Item {
     interval: 100
     onTriggered: {
       if (!root.mutationActive || !root.mutationProcessExited) return
+      var owner = root.activeMutationGeneration
+      mutationParser.flush()
+      if (!root.mutationActive || root.activeMutationGeneration !== owner) return
       root.mutationStreamFinished = true
       root.finishMutationIfReady()
     }
@@ -3663,27 +4129,41 @@ Item {
 
   Process {
     id: worker
+    objectName: "queryWorker"
     command: ["/usr/bin/python3", "-I", "-B", root.helperPath, "--serve"]
     stdinEnabled: true
 
     onStarted: {
+      if (root.queryStopping || root.timedOut || !root.requestActive) { running = false; hardStop.restart(); return }
       root.queryLaunching = false
       queryLaunchDeadline.stop()
       write(JSON.stringify(root.activeRequest) + "\n")
       deadline.restart()
     }
 
-    stdout: SplitParser {
-      onRead: function(line) { root.receiveOutput(line) }
+    stdout: BoundedJsonParser {
+      id: queryParser
+      objectName: "queryParser"
+      accepting: root.requestActive && !root.queryStopping
+      maxFrames: 128
+      onFrame: function(line) { root.receiveOutput(line) }
+      onFailed: function(message) { root.rejectQueryOutput(message) }
     }
 
     onExited: function(exitCode) {
+      var stopping = root.queryStopping
+      root.queryStopping = false
       root.queryLaunching = false
       queryLaunchDeadline.stop()
+      hardStop.stop()
       root.processExitCode = exitCode
       root.processExited = true
-      if (!root.streamFinished) root.streamFinished = true
-      root.finishRequestIfReady()
+      if (stopping) {
+        if (root.editorOpen) Qt.callLater(function() { root.resumeQueries() })
+      } else if (root.requestActive) {
+        if (root.streamFinished || root.timedOut) { root.streamFinished = true; root.finishRequestIfReady() }
+        else queryEofGrace.restart()
+      }
     }
   }
 
@@ -3694,6 +4174,7 @@ Item {
     stdinEnabled: true
 
     onStarted: {
+      if (!root.mutationActive || root.mutationTimedOut) { running = false; mutationHardStop.restart(); return }
       root.mutationLaunching = false
       mutationLaunchDeadline.stop()
       write(JSON.stringify(root.activeMutation) + "\n")
@@ -3701,9 +4182,20 @@ Item {
       mutationDeadline.restart()
     }
 
-    stdout: SplitParser {
+    stdout: BoundedJsonParser {
+      id: mutationParser
       objectName: "mutationParser"
-      onRead: function(line) { root.receiveMutationOutput(line) }
+      accepting: root.mutationActive && !root.mutationTimedOut
+      maxFrameBytes: 4194304
+      maxFrames: 256
+      onFrame: function(line) { root.receiveMutationOutput(line) }
+      onFailed: function(message) {
+        if (!root.mutationActive) return
+        root.mutationTimedOut = true
+        root.failPluginMutation(root.activeMutation,message)
+        mutationWorker.running = false
+        mutationHardStop.restart()
+      }
     }
 
     onExited: function(exitCode) {
@@ -3740,7 +4232,24 @@ Item {
         else root.ensureDiscovery()
       })
   }
-  onBatchItemsChanged: root.persistBatchJournal()
+  property bool batchProgressOnly: false
+  property string lastBatchJournalText: ""
+  Timer { id: journalWriteDelay; objectName: "journalWriteDelay"; interval: 250; onTriggered: root.persistBatchJournal() }
+  Timer {
+    id: queryEofGrace
+    objectName: "queryEofGrace"
+    interval: 100
+    onTriggered: {
+      var owner = root.activeGeneration
+      queryParser.flush()
+      if (root.requestActive && root.activeGeneration === owner) { root.streamFinished = true; root.finishRequestIfReady() }
+    }
+  }
+  onBatchItemsChanged: {
+    if (root.batchProgressOnly) journalWriteDelay.restart()
+    else root.persistBatchJournal()
+  }
+  onBatchKindChanged: root.persistBatchJournal()
   onBatchRunningChanged: {
     root.persistBatchJournal()
     if (!root.batchRunning) root.endBatchLifecycle()
@@ -3753,6 +4262,8 @@ Item {
     batchJournal.reload()
     startupReceiptFile.reload()
     root.request("load", {})
+    root.closedAt = Date.now()
+    root.scheduleSleep()
   }
 
   IpcHandler {
@@ -3760,6 +4271,9 @@ Item {
     target: "io.github.ctl0v0.outfit"
     function status(): string {
       return JSON.stringify({ demo: Boolean(root.demoRoot), opened: root.editorOpen,
+        sleeping:root.sleeping, queryWorkerRunning:worker.running || worker.processId > 0,
+        optionalWorkers:[updatesWorker,catalogWorker,inventoryWorker,backgroundWorker,readmeIndexer,searchPreparationWorker].filter(function(job) { return job.active }).length,
+        thumbnailWorkerActive:thumbnailLoader.active,
         ready: root.cacheLoaded && root.hasAnalyzed && !root.queryBusy && !root.backgroundBusy
           && !root.pendingEnrichment && !root.discoveryBusy && !root.mutationBusy
           && !root.hasCheckingOperations() && (!root.hostLifecycleSupported || root.hostRuntimeReady),
@@ -3784,6 +4298,10 @@ Item {
         batchRunning: root.batchRunning, batchSelected: root.selectedSetupRows().length,
         batchItems: root.batchItems.map(function(item) { return {id:item.id, status:item.status} }),
         inventoryReady: root.inventoryReady, results: root.setupTotal,
+        updatesLoaded:root.updatesLoaded, updatesBusy:root.updatesBusy, updatesCheckedAt:root.updatesCheckedAt,
+        availableUpdates:root.availableUpdateCount, updatesError:root.updatesError,
+        updatesUnavailableCount:root.updatesUnavailableCount, batchKind:root.batchKind,
+        selfUpdateState:root.selfUpdateState.state, selfUpdateBusy:root.selfUpdateBusy,
         hostLifecycle: {support:root.hostLifecycleSupport, state:root.hostLifecycleState,
           runtimeReady:root.hostRuntimeReady, endConfirmed:root.hostLeaseEndConfirmed,
           error:root.hostLifecycleError, snapshot:root.hostLifecycleSnapshot, plugins:root.hostRuntimeResults} })

@@ -55,6 +55,50 @@ TestCase {
     field.textEdited()
     return field
   }
+  function test_page_buttons_reset_results_after_loading_but_detail_back_keeps_position() {
+    var view = searchView(), service = view.service
+    function rows(page) {
+      var result = []
+      for (var i = 0; i < 24; i++) result.push({id:"example.page" + page + "row" + i,
+        name:"Page " + page + " plugin " + i, description:"A fictional plugin",kind:"panel",installAvailable:true})
+      return result
+    }
+    function finishPage(page) {
+      service.receiveOutput(JSON.stringify({ok:true,action:"quick-setup",generation:service.activeGeneration,
+        setup:{rows:rows(page),total:72,page:page,pageCount:3,grouping:"none",selectedServices:[],
+          installFilter:"all",partyFilter:"all",hardwareOnly:false,category:"",verification:"all"}}))
+      wait(0)
+    }
+    view.requestSetup("","",service.setupSort,1)
+    finishPage(1)
+    var scroll = findChild(view,"browseResultsScroll")
+    verify(scroll !== null)
+    scroll.contentItem.contentY = 600
+    verify(scroll.contentItem.contentY > 0)
+    findChild(view,"browseNextPage").clicked()
+    compare(service.activeRequest.setupPage,2)
+    compare(scroll.contentItem.contentY,0)
+    verify(!findChild(view,"browseNextPage").enabled)
+    // Simulate late layout/focus adjustment while old content is still present.
+    scroll.contentItem.contentY = 350
+    finishPage(2)
+    compare(scroll.contentItem.contentY,0)
+    compare(view.pageScrollSerial,-1)
+    scroll.contentItem.contentY = 600
+    findChild(view,"browsePreviousPage").clicked()
+    compare(service.activeRequest.setupPage,1)
+    finishPage(1)
+    compare(scroll.contentItem.contentY,0)
+    var card = view.browseCards()[5]
+    scroll.contentItem.contentY = card.mapToItem(scroll.contentItem,0,0).y
+    var saved = scroll.contentItem.contentY
+    view.openSetupDetail(card.pluginRow,card)
+    wait(0)
+    view.goBack()
+    wait(0)
+    compare(scroll.contentItem.contentY,saved)
+    view.close()
+  }
   function test_search_controls_auto_manual_clear_browse_all_and_resume() {
     var view = searchView(), service = view.service
     var picker = findChild(view, "browseSortPicker")
@@ -575,6 +619,9 @@ TestCase {
   function test_legacy_service_link_opens_canonical_manager_and_reset_keeps_interests() {
     var view = app()
     view.close()
+    // Closing retires an in-flight read-only helper; model its real exit before
+    // asking the next session to perform a settings write.
+    findChild(view.service,"queryWorker").exited(0,0)
     view.open(JSON.stringify({setupStage:"services"}))
     verify(view.interestsOpen)
     var before = JSON.stringify(view.service.interestsDraft)

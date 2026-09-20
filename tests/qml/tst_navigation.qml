@@ -208,8 +208,10 @@ TestCase {
     verify(view.batchConfirmOpen)
     keyClick(Qt.Key_Return)
     verify(!service.batchRunning, "Enter must not accept the destructive default")
-    // ConfirmDialog's portable stub deliberately has no key implementation.
-    // Verify the app barrier and cancel through the host signal contract.
+    verify(!view.batchConfirmOpen, "Enter chooses Cancel in the real Outfit confirmation")
+    view.batchConfirmOpen = true
+    wait(0)
+    // The themed dialog also preserves the existing explicit cancel signal.
     var surface = view.browseCards()[0]
     while (surface.parent) surface = surface.parent
     var dialogs = descendants(surface, function(item) { return item.confirmText === "Install all" })

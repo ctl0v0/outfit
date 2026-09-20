@@ -1,2 +1,2 @@
 import QtQuick
-QtObject { signal read(string line) }
+QtObject { property string splitMarker: "\n"; signal read(string line) }

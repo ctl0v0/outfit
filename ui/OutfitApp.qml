@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls as C
 import Quickshell
 import qs.Commons
@@ -19,6 +20,8 @@ Item {
   property var shell: null
   property var manifest: null
   property var service: null
+  readonly property bool sleeping: Boolean(service && service.sleeping === true)
+  readonly property bool uiAwake: opened && !sleeping
   readonly property bool canBrowse: Boolean(service && (service.canBrowse === true
     || (service.canBrowse === undefined && service.cacheLoaded)))
   readonly property bool canManagePlugins: Boolean(service && (service.canManagePlugins === true
@@ -40,6 +43,8 @@ Item {
   property bool interestsFromSettings: false
   property Item interestsInvoker: null
   property var pendingViewportRestore: null
+  property int pageScrollSerial: -1
+  property int pageScrollTarget: 0
   property string pendingPanelToken: ""
   property string activeView: "setup"
   property string setupStage: "browse"
@@ -61,6 +66,13 @@ Item {
   property var pendingSetupRestore: null
   property string pendingSelectedId: ""
   property bool batchConfirmOpen: false
+  property bool updateReviewOpen: false
+  property bool updateBatchReview: false
+  property var reviewedUpdates: []
+  property string updateReviewError: ""
+  readonly property bool updateBatch: Boolean(service && service.batchKind === "update")
+  readonly property bool updatesIdle: Boolean(service && canManagePlugins && service.inventoryReady
+    && !service.mutationBusy && !service.batchRunning && !service.selfUpdateBusy && !service.updatesBusy)
   property int selectedIndex: -1
   property string selectedId: ""
   property bool narrowDetailOpen: false
@@ -105,7 +117,7 @@ Item {
   onBrowseDensityChanged: dismissTooltips()
   onWorkspaceViewChanged: dismissTooltips()
 
-  readonly property bool confirmationOpen: actionConfirmOpen || batchConfirmOpen
+  readonly property bool confirmationOpen: actionConfirmOpen || batchConfirmOpen || updateReviewOpen
   readonly property bool headerNavigationEnabled: !confirmationOpen
   readonly property bool filtersExpanded: !service || service.filtersExpanded !== false
   readonly property string browseDensity: Presentation.densityName(service ? service.browseDensity : "comfortable")
@@ -226,7 +238,9 @@ Item {
     else if (setupDetailId) closeSetupDetail()
     else if (settingsOpen) leaveSettings()
     else if (setupStage === "services" && servicePickerEditing) cancelServicePicker()
-    else if (setupStage === "review" || setupStage === "progress") setupStage = "browse"
+    else if (setupStage === "updates") leaveUpdates()
+    else if (setupStage === "progress") setupStage = updateBatch ? "updates" : "browse"
+    else if (setupStage === "review") setupStage = "browse"
     else if (narrowDetailOpen) narrowDetailOpen = false
   }
   function chooseDensity(value) {
@@ -254,7 +268,10 @@ Item {
         for (var j = 0; j < updated.length; j++) {
           if (String(updated[j].pluginRow.id) !== anchor.id) continue
           var offset = updated[j].mapToItem(flickable, 0, 0).y
-          flickable.contentY = Presentation.anchoredScroll(flickable.contentY, anchor.offset,
+          // A compact/list card may be shorter than the old clipped portion.
+          // Keep at least its last pixel visible instead of skipping the ID.
+          var retainedOffset = Math.max(anchor.offset, 1 - updated[j].height)
+          flickable.contentY = Presentation.anchoredScroll(flickable.contentY, retainedOffset,
             offset, flickable.contentHeight, flickable.height)
           break
         }
@@ -370,14 +387,14 @@ Item {
   onSettingsOpenChanged: {
     dismissTooltips()
     maintenanceMenu.close()
-    Qt.callLater(function() { root.rememberPanel() })
+    flushPanel()
     if (!settingsOpen) return
     closeSetupDetail()
-    if (service) service.setThumbnailRows([])
+    setThumbnailRows([])
   }
   onSetupStageChanged: {
     dismissTooltips()
-    Qt.callLater(function() { root.rememberPanel() })
+    flushPanel()
     if (setupStage === "browse") {
       Qt.callLater(function() {
         if (!root || !root.opened || typeof root.restoreSetupDetailFocus !== "function") return
@@ -386,7 +403,10 @@ Item {
       return
     }
     closeSetupDetail()
-    if (service) service.setThumbnailRows([])
+    setThumbnailRows([])
+    if (setupStage === "updates") Qt.callLater(function() {
+      if (!root.setupDetailId) root.focusWorkspace()
+    })
   }
   onSetupDetailRowChanged: {
     ensureSetupPreview(setupDetailRow)
@@ -401,10 +421,10 @@ Item {
   }
   onActiveViewChanged: dismissTooltips()
   onSetupRowsChanged: captureRestoredInspector()
-  onInterestsOpenChanged: Qt.callLater(function() { root.rememberPanel() })
-  onSettingsTouchedChanged: Qt.callLater(function() { root.rememberPanel() })
-  onSetupDetailIdChanged: Qt.callLater(function() { root.rememberPanel() })
-  onServiceChanged: updateDiscoveryCache()
+  onInterestsOpenChanged: rememberPanel()
+  onSettingsTouchedChanged: rememberPanel()
+  onSetupDetailIdChanged: rememberPanel()
+  onServiceChanged: { thumbnailDemandKey = ""; updateDiscoveryCache() }
 
   function updateDiscoveryCache() {
     if (service && Array.isArray(service.discoveryRows))
@@ -439,6 +459,7 @@ Item {
   }
   function openInterests(invoker) {
     if (!service) return
+    flushPanel()
     dismissTooltips()
     maintenanceMenu.close()
     setupSearchDebounce.stop()
@@ -449,7 +470,7 @@ Item {
     interestsOpen = true
     setupDetailPanel.stopMedia()
     service.cancelPendingReadme(setupDetailId)
-    service.setThumbnailRows([])
+    setThumbnailRows([])
     service.beginInterests()
     Qt.callLater(function() { interestsManager.takeFocus(); root.rememberPanel() })
   }
@@ -497,6 +518,7 @@ Item {
   function restoreViewport() {
     if (!opened || !pendingViewportRestore) return
     var payload = pendingViewportRestore
+    if (payload.setupStage === "updates" && service && !service.updatesLoaded && service.updatesBusy) return
     var anchor = payload.scrollAnchor
     var scroll = currentScroll()
     var flickable = scroll.contentItem
@@ -515,6 +537,8 @@ Item {
         break
       }
     }
+    if (payload.updatesContext) updatesPage.restoreContext(payload.updatesContext)
+    else updatesPage.restorePosition(payload.updatesScroll)
     setupDetailPanel.restorePosition(payload.inspectorScroll, payload.inspectorFocus)
     pendingViewportRestore = null
     if (pendingPanelToken && service) {
@@ -523,12 +547,23 @@ Item {
     }
   }
   function rememberPanel() {
+    if (opened && !sleeping && !panelRememberTimer.running) panelRememberTimer.start()
+  }
+  function flushPanel() {
+    panelRememberTimer.stop()
     if (opened && service && !pendingViewportRestore && typeof service.rememberEditor === "function")
       service.rememberEditor(editorResumePayload(setupDetailId))
+  }
+  Timer {
+    id: panelRememberTimer
+    objectName: "panelRememberTimer"
+    interval: 120
+    onTriggered: root.flushPanel()
   }
 
   function chooseWorkspace(view) {
     if (!service) return
+    flushPanel()
     if (root.detailPrototypeSession) root.detailPrototypeOpen = false
     dismissTooltips()
     closeSetupDetail(false)
@@ -539,8 +574,101 @@ Item {
     rememberPanel()
   }
 
+  function openUpdates() {
+    if (!headerNavigationEnabled) return
+    flushPanel()
+    if (interestsOpen) leaveInterests()
+    settingsOpen = false
+    detailPrototypeOpen = false
+    setupSearchDebounce.stop()
+    searchDebounce.stop()
+    closeSetupDetail(false)
+    setupStage = "updates"
+    activeView = "setup"
+    Qt.callLater(function() { updatesPage.takeFocus(); root.rememberPanel() })
+  }
+  function leaveUpdates() {
+    flushPanel()
+    closeSetupDetail(false)
+    setupStage = "browse"
+    Qt.callLater(function() { updatesButton.forceActiveFocus(); root.rememberPanel() })
+  }
+  function openOutfitUpdate() {
+    if (!headerNavigationEnabled || !service) return
+    maintenanceMenu.close()
+    openUpdates()
+    var info = updateInfo({id:"io.github.ctl0v0.outfit"})
+      || {id:"io.github.ctl0v0.outfit", name:"Outfit"}
+    openSetupDetail(updateDetailRow(info), moreActionsButton)
+    if (typeof service.checkUpdates === "function") service.checkUpdates(false)
+  }
+  function updateInfo(row) {
+    // Explicitly observe replacement of the service array as well as its lookup.
+    var rows = service ? service.updates : []
+    return row && service && typeof service.updateInfo === "function" ? service.updateInfo(row.id) : null
+  }
+  function updateContext() {
+    return {inventoryReady:canManagePlugins && Boolean(service && service.inventoryReady),
+      mutationBusy:service && service.mutationBusy, batchRunning:service && service.batchRunning,
+      selfUpdateBusy:service && service.selfUpdateBusy, updatesBusy:service && service.updatesBusy,
+      updatesLoaded:service && service.updatesLoaded, updatesError:service ? service.updatesError : "",
+      interestsDirty:service && service.interestsDirty, settingsTouched:settingsTouched}
+  }
+  function checkUpdates() {
+    if (updatesIdle && typeof service.checkUpdates === "function") service.checkUpdates(true)
+  }
+  function updateDetailRow(row) {
+    var listing = InspectorState.snapshotFor(String(row.id), setupRows.concat(resultRows, matchRows, discoveryRows), null)
+    return Object.assign({}, canonicalEntry(row) || {}, listing || {}, {id:row.id, name:row.name || row.id})
+  }
+  function requestUpdate(row) {
+    var info = updateInfo(row)
+    if (!info || !InspectorState.updatePresentation(canonicalEntry(row), info, updateContext()).canUpdate) return
+    reviewedUpdates = [JSON.parse(JSON.stringify(info))]
+    updateBatchReview = false
+    updateReviewError = ""
+    updateReviewOpen = true
+  }
+  function reviewAllUpdates() {
+    if (!updatesIdle) return
+    var rows = (service.updates || []).filter(InspectorState.eligibleUpdate)
+    if (!rows.length) return
+    reviewedUpdates = JSON.parse(JSON.stringify(rows))
+    updateBatchReview = true
+    updateReviewError = ""
+    updateReviewOpen = true
+  }
+  function confirmUpdates() {
+    if (!updateReviewOpen || !reviewedUpdates.length) return false
+    var valid = updatesIdle && reviewedUpdates.every(function(row) {
+      var entry = root.canonicalEntry(row)
+      return InspectorState.sameUpdate(row, root.updateInfo(row))
+        && InspectorState.updatePresentation(entry, row, root.updateContext()).canUpdate
+        && String(entry.installedVersion || "") === String(row.installedVersion || "")
+        && String(entry.installedRevision || "") === String(row.installedRevision || "")
+        && (!root.updateBatchReview || InspectorState.eligibleUpdate(row))
+    })
+    if (!valid) {
+      updateReviewError = "Plugin versions or availability changed. Cancel and review the current updates before continuing."
+      return false
+    }
+    var resume = editorResumePayload(setupDetailId)
+    var started = updateBatchReview
+      ? service.startUpdateBatch(reviewedUpdates.map(function(row) { return row.id }), resume)
+      : reviewedUpdates[0].selfUpdate === true ? service.beginSelfUpdate(reviewedUpdates[0], resume)
+        : service.updatePlugin(reviewedUpdates[0], resume)
+    if (!started) {
+      updateReviewError = "The update could not start. Review the current plugin state and try again."
+      return false
+    }
+    updateReviewOpen = false
+    return true
+  }
+
   function focusWorkspace() {
-    if (!opened || settingsOpen || interestsOpen || setupStage !== "browse") return
+    if (!opened || settingsOpen || interestsOpen) return
+    if (setupStage === "updates") { updatesPage.takeFocus(); return }
+    if (setupStage !== "browse") return
     if (workspaceView === "discover") (discoverTab === "matches" ? matchesTabButton : ideasTabButton).forceActiveFocus()
     else setupSearchField.forceActiveFocus()
   }
@@ -593,7 +721,7 @@ Item {
     }
     return {
       view: ["fit", "setup"].indexOf(view) >= 0 ? view : "setup",
-      setupStage: ["services", "browse", "review", "progress"].indexOf(setupStage) >= 0
+      setupStage: ["services", "browse", "updates", "review", "progress"].indexOf(setupStage) >= 0
         ? setupStage : "browse",
       setupQuery: String(payload.setupQuery || "").slice(0, 160),
       setupGroup: browse.group,
@@ -608,6 +736,9 @@ Item {
       interestsOpen: payload.interestsOpen === true || setupStage === "services",
       interestsFromSettings: payload.interestsFromSettings === true,
       scrollAnchor: payload.scrollAnchor || null,
+      updatesQuery: String(payload.updatesQuery || "").slice(0, 160),
+      updatesScroll: Math.max(0, Math.min(1000000, Number(payload.updatesScroll) || 0)),
+      updatesContext: payload.updatesContext && typeof payload.updatesContext === "object" ? payload.updatesContext : null,
       inspectorScroll: Math.max(0, Number(payload.inspectorScroll) || 0),
       inspectorFocus: String(payload.inspectorFocus || "close"),
       installDraft: payload.installDraft || null,
@@ -672,6 +803,7 @@ Item {
     if (setupStage === "services") setupStage = "browse"
     servicePickerEditing = setupStage === "services"
     opened = true
+    updatesPage.query = payload.updatesQuery
     syncDraft()
     syncServiceDraft()
     if (payload.restoreDraft && payload.draft) {
@@ -779,7 +911,7 @@ Item {
   }
 
   function close() {
-    rememberPanel()
+    flushPanel()
     pendingPanelToken = ""
     dismissTooltips()
     maintenanceMenu.close()
@@ -789,10 +921,13 @@ Item {
       service.cancelPendingReadme(setupDetailId)
     closingFromHost = true
     opened = false
+    thumbnailDemandTimer.stop()
+    setThumbnailRows([])
     searchDebounce.stop()
     setupSearchDebounce.stop()
     settingsOpen = false
     actionConfirmOpen = false
+    updateReviewOpen = false
     pendingAction = ""
     actionTarget = null
     setupDetailFocusPending = false
@@ -803,13 +938,13 @@ Item {
   Component.onDestruction: {
     closingFromHost = true
     if (service) {
-      rememberPanel()
+      flushPanel()
       if (typeof service.editorClosed === "function") service.editorClosed()
     }
   }
 
   function requestClose() {
-    rememberPanel()
+    flushPanel()
     if (service && typeof service.userClosedEditor === "function") service.userClosedEditor()
     if (shell && typeof shell.hide === "function") shell.hide(pluginId)
     else close()
@@ -822,6 +957,31 @@ Item {
     dismissTooltips()
     service.quickSetup(
       query, group, sort, page, service.setupServiceIds, service.setupServiceFilter)
+  }
+  function changeSetupPage(page) {
+    if (!service || service.queryBusy || page < 1 || page > service.setupPageCount || page === service.setupPage) return false
+    if (pendingViewportRestore) pendingViewportRestore.scrollAnchor = {id:"",offset:0,y:0}
+    requestSetup(setupSearchField.text.trim(), service.setupGroup, service.setupSort, page)
+    pageScrollSerial = service.setupSearchSerial
+    pageScrollTarget = page
+    rovingResultId = ""
+    // Move focus off the footer before it can pull the new results back down.
+    setupSearchField.forceActiveFocus()
+    setupCatalogScroll.contentItem.cancelFlick()
+    setupCatalogScroll.contentItem.contentY = 0
+    return true
+  }
+  function finishPageScroll() {
+    if (pageScrollSerial < 0 || !service || service.queryBusy || service.pendingSetup) return
+    var current = pageScrollSerial === service.setupSearchSerial && pageScrollTarget === service.setupPage
+    pageScrollSerial = -1
+    pageScrollTarget = 0
+    if (!current || !browseNavigation || service.error) return
+    setupCatalogScroll.contentItem.cancelFlick()
+    setupCatalogScroll.contentItem.contentY = 0
+    focusResults()
+    setupCatalogScroll.contentItem.contentY = 0
+    rememberPanel()
   }
 
   function editSetupSearch() {
@@ -1043,6 +1203,10 @@ Item {
     var rows = matchRows.concat(discoveryRows).concat(setupRows).concat(resultRows)
     var frozen = service ? service.inspectorSnapshot : null
     var restored = frozen && frozen.id === setupDetailId ? frozen : InspectorState.snapshotFor(setupDetailId, rows, null)
+    if (!restored && setupStage === "updates") {
+      var info = updateInfo({id:setupDetailId})
+      if (info) restored = updateDetailRow(info)
+    }
     if (restored) setInspectorSnapshot(restored)
   }
 
@@ -1058,6 +1222,11 @@ Item {
 
   function openSetupDetail(row, invoker) {
     if (!row) return
+    flushPanel()
+    if (setupStage === "updates") {
+      updatesPage.focusedId = String(row.id)
+      updatesPage.focusedAction = "details"
+    }
     if (root.detailPrototypeSession) {
       root.detailPrototypeInvoker = invoker || null
       root.detailPrototypeOpen = true
@@ -1078,6 +1247,7 @@ Item {
   }
 
   function closeSetupDetail(restoreFocus) {
+    flushPanel()
     var closingId = setupDetailId
     var invoker = inspectorInvoker
     dismissTooltips()
@@ -1090,6 +1260,12 @@ Item {
     if (service && "setupDetailId" in service) service.setupDetailId = ""
     setupReadmeExpanded = false
     setupDetailFocusPending = false
+    if (restoreFocus !== false && closingId && opened && setupStage === "updates" && !settingsOpen) {
+      Qt.callLater(function() {
+        if (!root.opened || root.setupDetailId || root.setupStage !== "updates") return
+        updatesPage.restoreFocus()
+      })
+    }
     if (restoreFocus !== false && closingId && opened && setupStage === "browse" && !settingsOpen)
       Qt.callLater(function() {
         if (root.opened && !root.setupDetailId && root.setupStage === "browse"
@@ -1142,7 +1318,7 @@ Item {
   }
 
   function ensureSetupPreview(row) {
-    if (!opened || settingsOpen || interestsOpen || setupStage !== "browse") return
+    if (!opened || settingsOpen || interestsOpen || ["browse", "updates"].indexOf(setupStage) < 0) return
     if (service && row && row.readmeAvailable === true
         && service.preferences.readmeEnrichment !== false
         && (String(service.readmePluginId || "") !== String(row.id || "")
@@ -1152,7 +1328,7 @@ Item {
 
   function restoreSetupDetailFocus() {
     if (!setupDetailFocusPending || !opened || activeView !== "setup"
-        || setupStage !== "browse" || !setupDetailRow || !setupDetailPanel.visible)
+        || ["browse", "updates"].indexOf(setupStage) < 0 || !setupDetailRow || !setupDetailPanel.visible)
       return false
     setupDetailFocusPending = false
     setupDetailPanel.takeFocus()
@@ -1234,16 +1410,17 @@ Item {
 
   function confirmSetupBatch() {
     batchConfirmOpen = false
+    if (!service || service.selfUpdateBusy || service.mutationBusy || service.batchRunning) return
     if (!service || !service.startSetupBatch(setupResumePayload("progress"))) return
     setupStage = "progress"
   }
 
   function setupStatusLabel(status) {
     if (status === "running") return "IN PROGRESS"
-    if (status === "completed") return "INSTALLED"
+    if (status === "completed") return updateBatch ? "UPDATED" : "INSTALLED"
     if (status === "partial") return "NEEDS ATTENTION"
     if (status === "failed") return "NEEDS ATTENTION"
-    if (status === "skipped") return "ALREADY PRESENT"
+    if (status === "skipped") return updateBatch ? "SKIPPED" : "ALREADY PRESENT"
     return "WAITING"
   }
 
@@ -1389,7 +1566,9 @@ Item {
     if (!row || !service || service.preferences.marketplaceThumbnails === false) return ""
     var image = service.thumbnails ? service.thumbnails[row.id] : null
     var url = String(row.previewThumbnail || row.previewImage || "")
-    return image && image.url === url && trustedLocalThumbnailUrl(image.localSource) ? String(image.localSource) : ""
+    return image && image.url === url && (image.source !== "readme" || (service.preferences.readmeEnrichment !== false
+      && image.repo === row.repo && image.listingCommit === row.listingCommit))
+      && trustedLocalThumbnailUrl(image.localSource) ? String(image.localSource) : ""
   }
 
   function detailMetadata(row) {
@@ -1414,7 +1593,7 @@ Item {
   function detailPresentation(row) {
     var state = inspectorState(row)
     var opening = service && service.pluginOpenPending(row.id)
-    return Object.assign({}, state, {
+    return Object.assign({}, state, InspectorState.updatePresentation(canonicalEntry(row), updateInfo(row), updateContext()), {
       primaryAction:state.action,
       primaryLabel:opening ? "Opening…" : state.action === "install" ? "Install" : state.primaryLabel,
       primaryEnabled:primaryEnabled(row),
@@ -1455,25 +1634,72 @@ Item {
       /^thumb-[0-9a-f]{32}-[0-9a-f]{16}\.(?:png|jpg|webp|gif)$/)
   }
 
-  Timer {
-    interval: 250
-    repeat: true
-    running: root.opened && !root.settingsOpen && !root.interestsOpen && root.setupStage === "browse"
-      && root.service && root.service.preferences.marketplaceThumbnails !== false
-    onTriggered: {
-      if (root.setupDetailRow) {
-        root.service.setThumbnailRows([root.setupDetailRow])
-        return
+  property string thumbnailDemandKey: ""
+  property var thumbnailDemandIds: ({})
+  readonly property bool thumbnailDemandActive: uiAwake && !settingsOpen && !interestsOpen
+    && (setupStage === "browse" || (setupStage === "updates" && Boolean(setupDetailRow)))
+    && service && service.preferences.marketplaceThumbnails !== false
+  // Observe semantic inputs, not thumbnail completion: completion must not
+  // request the same work again. Geometry is observed by HelpScrollView below.
+  readonly property var thumbnailInputs: [thumbnailDemandActive, setupDetailRow, workspaceView,
+    discoverTab, setupRows, matchRows, discoveryRows, browseDensity, filtersExpanded,
+    service ? service.preferences.readmeEnrichment : false]
+  onThumbnailInputsChanged: scheduleThumbnailDemand()
+  function scheduleThumbnailDemand() {
+    if (!thumbnailDemandTimer) return
+    if (!thumbnailDemandActive) {
+      thumbnailDemandTimer.stop()
+      setThumbnailRows([])
+    } else if (!thumbnailDemandTimer.running) thumbnailDemandTimer.start()
+  }
+  function setThumbnailRows(rows) {
+    if (!service || typeof service.setThumbnailRows !== "function") return
+    var key = JSON.stringify([service.preferences.readmeEnrichment !== false, rows.map(function(row) {
+      return [row.id, row.previewThumbnail || row.previewImage || "", row.repo || "", row.listingCommit || ""]
+    })])
+    if (key === thumbnailDemandKey) return
+    thumbnailDemandKey = key
+    var ids = ({})
+    for (var row of rows) ids[String(row.id)] = true
+    thumbnailDemandIds = ids
+    service.setThumbnailRows(rows)
+  }
+  function refreshThumbnailDemand() {
+    if (!thumbnailDemandActive) { setThumbnailRows([]); return }
+    if (setupDetailRow) { setThumbnailRows([setupDetailRow]); return }
+    var rows = []
+    if (workspaceView === "discover") {
+      var repeater = discoverTab === "matches" ? matchesRepeater : discoveryRepeater
+      var viewport = currentScroll()
+      for (var c = 0; c < repeater.count; c++) {
+        var item = repeater.itemAt(c)
+        if (!item) continue
+        var point = item.mapToItem(viewport, 0, 0)
+        if (point.y + item.height > -100 && point.y < viewport.height + 100)
+          rows.push(item.pluginRow || item.modelData)
       }
-      var rows = root.workspaceView === "discover" ? (root.discoverTab === "matches" ? root.matchRows.slice() : root.discoveryRows.slice()) : []
-      if (root.workspaceView === "browse") {
-        for (var i = 0; i < setupGroupRepeater.count; i++) {
-          var group = setupGroupRepeater.itemAt(i)
-          if (group && group.visible) rows = rows.concat(group.visibleThumbnailRows())
-        }
+    } else {
+      for (var i = 0; i < setupGroupRepeater.count; i++) {
+        var group = setupGroupRepeater.itemAt(i)
+        if (group && group.visible) rows = rows.concat(group.visibleThumbnailRows())
       }
-      root.service.setThumbnailRows(rows)
     }
+    setThumbnailRows(rows)
+  }
+  Timer {
+    id: thumbnailDemandTimer
+    objectName: "thumbnailDemandTimer"
+    interval: 40
+    onTriggered: root.refreshThumbnailDemand()
+  }
+  function invalidateThumbnail(id, source) {
+    if (!source || !service || typeof service.invalidateThumbnail !== "function") return
+    var cached = service.thumbnails ? service.thumbnails[String(id)] : null
+    if (cached && String(cached.localSource || "") === String(source))
+      service.invalidateThumbnail(String(id), String(source))
+  }
+  function imageBucket(size, dpr) {
+    return Math.max(128, Math.min(4096, Math.ceil(Math.max(1, size) * Math.max(1, dpr) / 128) * 128))
   }
 
   function trustedDemoUrl(value) {
@@ -1541,6 +1767,8 @@ Item {
       selected: row && service && service.setupSelected(row.id),
       batchRunning: service && service.batchRunning,
       mutationBusy: service && service.mutationBusy,
+      selfUpdateBusy: service && service.selfUpdateBusy,
+      batchKind: service ? service.batchKind : "install",
       batchFailure: batchFailure,
       selfId: pluginId,
       rememberedSection: row && service && service.placementChoices ? service.placementChoices[row.id] : ""
@@ -1557,6 +1785,7 @@ Item {
 
   function inspectorPrimary(row) {
     if (!row || !service) return
+    if (service.selfUpdateBusy) return
     var state = inspectorState(row)
     inspectorActionError = ""
     if (state.action === "install") requestAction("install", row)
@@ -1575,6 +1804,7 @@ Item {
     else if (state.action === "project" && state.projectUrl) Qt.openUrlExternally(state.projectUrl)
     else if (state.action === "retry" && !state.pending && !service.batchRunning) {
       var lastAction = String(service.pluginOperation(row.id).lastAction || "")
+      if (lastAction === "update-plugin" && !updatesIdle) return
       if (state.known && ((!state.installed && lastAction === "install-plugin")
           || (state.installed && lastAction === "remove-plugin"))) {
         requestAction(lastAction === "install-plugin" ? "install" : "remove", row, true)
@@ -1587,6 +1817,7 @@ Item {
   }
 
   function primaryEnabled(row) {
+    if (service && service.selfUpdateBusy) return false
     var state = inspectorState(row)
     if (state.action === "open") return state.canOpen && service && !service.pluginOpenBusy
     if (state.action === "enable") return state.canToggle
@@ -1594,6 +1825,7 @@ Item {
     if (state.action === "project") return Boolean(state.projectUrl)
     if (state.action === "review" || state.action === "progress") return true
     if (state.action === "retry") return !state.pending && service && !service.batchRunning
+      && (String(service.pluginOperation(row.id).lastAction || "") !== "update-plugin" || updatesIdle)
     return state.action === "install" && state.canInstall
   }
 
@@ -1738,6 +1970,9 @@ Item {
       interestsOpen: interestsOpen,
       interestsFromSettings: interestsFromSettings,
       scrollAnchor: viewportAnchor(),
+      updatesQuery: updatesPage.query,
+      updatesScroll: updatesPage.scrollPosition(),
+      updatesContext: updatesPage.context(),
       inspectorScroll: setupDetailPanel.scrollPosition(),
       inspectorFocus: setupDetailPanel.focusName(),
       installDraft: {enable:draftInstallEnabled, section:draftInstallSection},
@@ -1796,6 +2031,7 @@ Item {
     if (service.notice) return service.notice
     if (service.mutationActive) {
       if (service.mutationAction === "install-plugin") return "Installing the selected plugin in the background."
+      if (service.mutationAction === "update-plugin") return "Updating the selected plugin in the background."
       if (service.mutationAction === "enable-plugin") return "Enabling the selected plugin in the background."
       if (service.mutationAction === "disable-plugin") return "Disabling the selected plugin in the background."
       if (service.mutationAction === "place-plugin") return "Moving the selected bar widget in the background."
@@ -1810,14 +2046,15 @@ Item {
       if (service.activeAction === "refresh") return "Refreshing marketplace metadata."
       return "Searching listings and selected README content."
     }
-    if (service.batchRunning) return "Batch install is installing plugins in sequence."
+    if (service.batchRunning) return updateBatch ? "Batch update is updating plugins in sequence." : "Batch install is installing plugins in sequence."
     if (!service.hasAnalyzed) return "Browse now — catalog search is ready. Local fit checks are optional."
     return resultRows.length + " matches using this system's hardware and capabilities."
   }
 
   function busySubtitle() {
     if (!service) return "Starting Outfit…"
-    if (service.batchRunning) return "Batch install in progress…"
+    if (service.selfUpdateBusy) return String((service.selfUpdateState || {}).message || "Updating Outfit & reopening…")
+    if (service.batchRunning) return updateBatch ? "Batch update in progress…" : "Batch install in progress…"
     if (service.mutationActive) return service.pluginProgress(service.activeMutation.pluginId)
     if (service.hasCheckingOperations()) return "Checking plugin state…"
     if (service.mutationBusy) return "Updating plugin…"
@@ -2098,16 +2335,29 @@ Item {
     readonly property string thumbnailUrl: String(pluginRow.previewThumbnail || pluginRow.previewImage || "")
     readonly property var thumbnail: root.service && root.service.thumbnails
       ? root.service.thumbnails[pluginRow.id] : null
-    readonly property string localThumbnail: thumbnail && thumbnail.url === thumbnailUrl
+    readonly property bool thumbnailMatches: Boolean(thumbnail && thumbnail.url === thumbnailUrl
+      && (thumbnail.source !== "readme" || (root.service.preferences.readmeEnrichment !== false
+        && thumbnail.repo === pluginRow.repo && thumbnail.listingCommit === pluginRow.listingCommit)))
+    readonly property bool canLoadThumbnail: Boolean(thumbnailUrl || (root.service
+      && root.service.preferences.readmeEnrichment !== false && pluginRow.repo
+      && /^[0-9a-f]{40}$/.test(String(pluginRow.listingCommit || ""))))
+    readonly property string localThumbnail: thumbnailMatches
       ? String(thumbnail.localSource || "") : ""
+    function previewStatus(status) {
+      if (status === Image.Error || (thumbnailMatches && thumbnail.state === "failed")) return "Preview unavailable"
+      if (canLoadThumbnail && (!thumbnailMatches || thumbnail.state === "deferred" || status === Image.Loading)) return "Loading preview…"
+      return "No preview available"
+    }
     readonly property bool showThumbnail: root.service
       && root.service.preferences.marketplaceThumbnails !== false
+    readonly property bool imageDemand: root.uiAwake && visible && showThumbnail && !root.setupDetailId
+      && root.thumbnailDemandIds[String(pluginRow.id)] === true
     FontMetrics { id: descriptionMetrics; font.family: root.fontFamily; font.pixelSize: setupPluginCard.copySize }
     FontMetrics { id: captionMetrics; font.family: root.fontFamily; font.pixelSize: setupPluginCard.metadataSize }
     FontMetrics { id: headingMetrics; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
 
-    height: listRow ? Math.max(Style.space(listLayout.minimumHeight), listContent.implicitHeight + Style.space(16))
-      : Math.max(Style.space(176), setupCardContent.implicitHeight + Style.space(density.padding * 2))
+    height: listRow ? Math.max(Style.space(listLayout.minimumHeight), cardLayout.implicitHeight + Style.space(16))
+      : Math.max(Style.space(176), cardLayout.implicitHeight + Style.space(density.padding * 2))
     radius: Style.cornerRadius
     color: inspected ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.11)
       : (chosen ? Style.selectedFillFor(root.foreground, Color.accent) : root.faint)
@@ -2150,12 +2400,7 @@ Item {
     Accessible.onPressAction: root.openSetupDetail(pluginRow, setupPluginCard)
 
     function relayoutContent() {
-      if (listRow) {
-        listBadges.forceLayout()
-        listMetrics.forceLayout()
-        listCopy.forceLayout()
-        listStatus.forceLayout()
-      } else setupCardContent.forceLayout()
+      if (cardLayout.item) cardLayout.item.relayout()
     }
 
     MouseArea {
@@ -2168,11 +2413,23 @@ Item {
       }
     }
 
+    Loader {
+      id: cardLayout
+      anchors.fill: parent
+      anchors.margins: Style.space(setupPluginCard.listRow ? 8 : setupPluginCard.density.padding)
+      sourceComponent: setupPluginCard.listRow ? listCardLayout : gridCardLayout
+      onLoaded: root.scheduleThumbnailDemand()
+    }
+    Component {
+      id: listCardLayout
     Item {
       id: listContent
-      visible: setupPluginCard.listRow
-      anchors.fill: parent
-      anchors.margins: Style.space(8)
+      function relayout() {
+        listBadges.forceLayout()
+        listMetrics.forceLayout()
+        listCopy.forceLayout()
+        listStatus.forceLayout()
+      }
       readonly property bool sideStatus: setupPluginCard.listLayout.sideStatus
         && usableWidth - listCopy.x - statusWidth - Style.space(12) >= listMetrics.minimumRowWidth
       readonly property real usableWidth: Math.max(1, width)
@@ -2199,12 +2456,13 @@ Item {
         Image {
           id: listImage
           anchors.fill: parent
-          source: setupPluginCard.listRow && setupPluginCard.showThumbnail
+          source: setupPluginCard.imageDemand && visible
             && root.trustedLocalThumbnailUrl(setupPluginCard.localThumbnail) ? setupPluginCard.localThumbnail : ""
           asynchronous: true
           fillMode: Image.PreserveAspectFit
-          sourceSize.width: 336
-          sourceSize.height: 189
+          sourceSize.width: root.imageBucket(width, Screen.devicePixelRatio)
+          sourceSize.height: root.imageBucket(height, Screen.devicePixelRatio)
+          onStatusChanged: if (status === Image.Error) root.invalidateThumbnail(setupPluginCard.pluginRow.id, source)
         }
         OutfitIcon {
           anchors.centerIn: parent
@@ -2224,8 +2482,7 @@ Item {
         HelpTip {
           target: listPreview
           hoverRequested: listPreviewHover.containsMouse && listImage.status !== Image.Ready
-          helpText: setupPluginCard.thumbnailUrl && (!setupPluginCard.thumbnail || listImage.status === Image.Loading)
-            ? "Loading preview…" : "No preview available"
+          helpText: setupPluginCard.previewStatus(listImage.status)
         }
         NewListingTag {
           labelSize: setupPluginCard.metadataSize
@@ -2365,12 +2622,13 @@ Item {
         labelSize: setupPluginCard.metadataSize
       }
     }
+    }
 
+    Component {
+      id: gridCardLayout
     Column {
       id: setupCardContent
-      visible: !setupPluginCard.listRow
-      anchors.fill: parent
-      anchors.margins: Style.space(setupPluginCard.density.padding)
+      function relayout() { forceLayout() }
       spacing: Style.space(setupPluginCard.density.spacing)
 
       Text {
@@ -2398,12 +2656,14 @@ Item {
         Image {
           id: cardThumbnail
           anchors.fill: parent
-          source: !setupPluginCard.listRow && root.trustedLocalThumbnailUrl(setupPluginCard.localThumbnail)
+          source: setupPluginCard.imageDemand && visible
+            && root.trustedLocalThumbnailUrl(setupPluginCard.localThumbnail)
             ? setupPluginCard.localThumbnail : ""
           asynchronous: true
           fillMode: Image.PreserveAspectFit
-          sourceSize.width: 720
-          sourceSize.height: 405
+          sourceSize.width: root.imageBucket(width, Screen.devicePixelRatio)
+          sourceSize.height: root.imageBucket(height, Screen.devicePixelRatio)
+          onStatusChanged: if (status === Image.Error) root.invalidateThumbnail(setupPluginCard.pluginRow.id, source)
         }
         Column {
           anchors.centerIn: parent
@@ -2419,8 +2679,7 @@ Item {
           }
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: setupPluginCard.thumbnailUrl && (!setupPluginCard.thumbnail || cardThumbnail.status === Image.Loading)
-              ? "Loading preview…" : "No preview available"
+            text: setupPluginCard.previewStatus(cardThumbnail.status)
             textFormat: Text.PlainText
             color: root.secondary
             font.family: root.fontFamily
@@ -2547,6 +2806,7 @@ Item {
         minimumHeight: Style.space(setupPluginCard.density.footerHeight)
       }
     }
+    }
   }
 
   function metricHelp(metric) {
@@ -2672,14 +2932,18 @@ Item {
 
   component HelpScrollView: ContentScrollView {
     id: helpScroll
+    onWidthChanged: root.scheduleThumbnailDemand()
+    onHeightChanged: root.scheduleThumbnailDemand()
     Connections {
       target: helpScroll.contentItem
       ignoreUnknownSignals: true
-      function onContentXChanged() { root.dismissTooltips(); helpScrollPause.restart() }
+      function onContentXChanged() { root.dismissTooltips(); helpScrollPause.restart(); root.scheduleThumbnailDemand() }
       function onContentYChanged() {
         root.dismissTooltips(); helpScrollPause.restart()
-        Qt.callLater(function() { root.rememberPanel() })
+        root.rememberPanel()
+        root.scheduleThumbnailDemand()
       }
+      function onContentHeightChanged() { root.scheduleThumbnailDemand() }
     }
   }
 
@@ -3068,16 +3332,16 @@ Item {
             && !mediaPreview.videoRequested
           anchors.fill: parent
           anchors.margins: Style.space(5)
-          source: visible && (root.trustedLocalPreviewUrl(mediaPreview.selectedLocalSource) || root.trustedLocalThumbnailUrl(mediaPreview.selectedLocalSource))
+          source: root.uiAwake && visible && (root.trustedLocalPreviewUrl(mediaPreview.selectedLocalSource) || root.trustedLocalThumbnailUrl(mediaPreview.selectedLocalSource))
             ? mediaPreview.selectedLocalSource : ""
           asynchronous: true
           cache: true
           fillMode: Image.PreserveAspectFit
           autoTransform: true
-          sourceSize.width: 900
-          sourceSize.height: 520
+          sourceSize.width: root.imageBucket(width, Screen.devicePixelRatio)
+          sourceSize.height: root.imageBucket(height, Screen.devicePixelRatio)
           readonly property bool expandable: mediaPreview.selectedKind === "image" && status === Image.Ready
-          activeFocusOnTab: expandable
+          activeFocusOnTab: expandable || activeFocus
           Accessible.role: Accessible.Button
           Accessible.name: "Expand preview image"
           Accessible.onPressAction: if (expandable) fullPreview.open()
@@ -3087,8 +3351,10 @@ Item {
 
           onStatusChanged: {
             if (mediaPreview.selectedKind !== "image") return
-            if (status === Image.Error)
+            if (status === Image.Error) {
               mediaPreview.imageError = "This preview could not be displayed here."
+              root.invalidateThumbnail(mediaPreview.pluginRow.id, source)
+            }
             else if (status === Image.Ready) mediaPreview.imageError = ""
           }
 
@@ -3105,7 +3371,7 @@ Item {
           visible: mediaPreview.selectedKind === "video" && mediaPreview.videoRequested
           anchors.fill: parent
           anchors.margins: Style.space(5)
-          requested: mediaPreview.videoRequested && root.trustedPreviewUrl(mediaPreview.selectedMedia.url)
+          requested: root.uiAwake && visible && mediaPreview.videoRequested && root.trustedPreviewUrl(mediaPreview.selectedMedia.url)
           mediaSource: requested && root.trustedPreviewUrl(mediaPreview.selectedMedia.url)
             ? String(mediaPreview.selectedMedia.url) : ""
 
@@ -3267,7 +3533,7 @@ Item {
                 visible: Boolean(modelData.localSource)
                 anchors.fill: parent
                 anchors.margins: Style.space(3)
-                source: visible && root.trustedLocalPreviewUrl(modelData.localSource)
+                source: root.uiAwake && visible && root.trustedLocalPreviewUrl(modelData.localSource)
                   ? String(modelData.localSource) : ""
                 asynchronous: true
                 cache: true
@@ -3320,12 +3586,17 @@ Item {
           onClicked: fullPreview.close()
         }
         Image {
+          objectName: "nativeFullSizeImage"
           anchors.top: fullPreviewClose.bottom
           anchors.topMargin: Style.space(12)
           anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-          source: fullPreview.visible && (root.trustedLocalPreviewUrl(mediaPreview.selectedLocalSource)
+          source: root.uiAwake && mediaPreview.visible && fullPreview.visible && (root.trustedLocalPreviewUrl(mediaPreview.selectedLocalSource)
             || root.trustedLocalThumbnailUrl(mediaPreview.selectedLocalSource)) ? mediaPreview.selectedLocalSource : ""
           fillMode: Image.PreserveAspectFit
+          asynchronous: true
+          sourceSize.width: root.imageBucket(width, Screen.devicePixelRatio)
+          sourceSize.height: root.imageBucket(height, Screen.devicePixelRatio)
+          onStatusChanged: if (status === Image.Error) root.invalidateThumbnail(mediaPreview.pluginRow.id, source)
         }
       }
     }
@@ -3346,11 +3617,14 @@ Item {
     PluginDetailPage {
       id: detailPage
       anchors.fill: parent
+      active: root.uiAwake && visible
+      service: root.service
       pluginRow: root.detailMetadata(liveInspector.row)
       presentation: root.detailPresentation(liveInspector.row)
       installEnabled: root.draftInstallEnabled
       installSection: root.draftInstallSection
-      backLabel: root.workspaceView === "discover" ? (root.discoverTab === "matches" ? "Back to Matches" : "Back to Discover") : "Back to Browse"
+      backLabel: root.setupStage === "updates" ? "Back to Updates"
+        : root.workspaceView === "discover" ? (root.discoverTab === "matches" ? "Back to Matches" : "Back to Discover") : "Back to Browse"
       mediaAvailable: root.readmeMediaFor(liveInspector.row).length > 0
         || root.readmeMediaLoading(liveInspector.row) || Boolean(root.detailThumbnail(liveInspector.row))
       mediaComponent: Component {
@@ -3369,6 +3643,8 @@ Item {
       }
       onQueueRequested: root.toggleSetupSelection(liveInspector.row)
       onRemoveRequested: root.requestAction("remove", liveInspector.row)
+      onUpdateRequested: root.requestUpdate(liveInspector.row)
+      onUpdateCheckRequested: root.checkUpdates()
       onSourceRequested: if (root.service) root.service.openSource(liveInspector.row)
       onMarketplaceRequested: if (root.service) root.service.openMarketplace(liveInspector.row)
       onDocumentationRequested: if (root.service) root.service.loadReadme(liveInspector.row)
@@ -4005,7 +4281,10 @@ Item {
     ignoreUnknownSignals: true
     function onDiscoveryRowsChanged() { root.updateDiscoveryCache() }
     function onMatchesChanged() { root.captureRestoredInspector(); Qt.callLater(function() { root.restoreViewport() }) }
-    function onSetupRowsChanged() { Qt.callLater(function() { root.restoreViewport() }) }
+    function onSetupRowsChanged() { Qt.callLater(function() { root.restoreViewport(); root.finishPageScroll() }) }
+    function onUpdatesChanged() { root.captureRestoredInspector(); Qt.callLater(function() { root.restoreViewport() }) }
+    function onUpdatesLoadedChanged() { Qt.callLater(function() { root.restoreViewport() }) }
+    function onUpdatesBusyChanged() { Qt.callLater(function() { root.restoreViewport() }) }
     function onWorkspaceViewChanged() {
       root.dismissTooltips()
       if (root.opened && root.workspaceView === "discover") root.ensureDiscovery()
@@ -4069,6 +4348,7 @@ Item {
       if (root.service.batchRunning) root.setupStage = "progress"
     }
     function onQueryBusyChanged() {
+      if (!root.service.queryBusy) Qt.callLater(function() { root.finishPageScroll() })
       if (!root.service.queryBusy && root.pendingServiceChoices !== null
           && root.service.error) root.pendingServiceChoices = null
     }
@@ -4196,6 +4476,7 @@ Item {
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
         if (detailPrototypeLoader.active) return
+        if (root.updateReviewOpen) return
         if (root.actionConfirmOpen) {
           if (actionConfirm.handleKey(event)) event.accepted = true
           return
@@ -4221,9 +4502,10 @@ Item {
                    && root.servicePickerEditing) root.cancelServicePicker()
           else if (root.activeView === "setup" && root.setupStage === "review")
             root.setupStage = "browse"
+          else if (root.setupStage === "updates") root.leaveUpdates()
           else if (root.activeView === "setup" && root.setupStage === "progress"
                    && root.service && !root.service.batchRunning) {
-             root.setupStage = "browse"
+             root.setupStage = root.updateBatch ? "updates" : "browse"
           }
           else if (root.narrowWorkspace && root.narrowDetailOpen) root.narrowDetailOpen = false
           else root.requestClose()
@@ -4271,6 +4553,12 @@ Item {
           event.accepted = true
         } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
           if (root.interestsOpen) { event.accepted = true; return }
+          if (root.setupStage === "updates" && !root.settingsOpen) {
+            root.closeSetupDetail(false)
+            updatesPage.takeFocus()
+            event.accepted = true
+            return
+          }
           root.settingsOpen = false
           if (root.setupStage === "browse" && root.workspaceView !== "browse") root.chooseWorkspace("browse")
           if (root.activeView === "setup" && !root.setupDetailInline
@@ -4408,6 +4696,20 @@ Item {
             anchors.top: parent.top
             spacing: Style.space(7)
 
+            Button {
+              id: updatesButton
+              objectName: "updatesButton"
+              text: "Updates (" + (root.service ? Number(root.service.availableUpdateCount || 0) : 0) + ")"
+              foreground: root.foreground
+              bordered: true
+              focusable: true
+              selected: root.setupStage === "updates" && !root.settingsOpen && !root.interestsOpen
+              enabled: root.headerNavigationEnabled
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              Accessible.onPressAction: if (enabled) clicked()
+              onClicked: root.openUpdates()
+            }
             HeaderButton {
               id: moreActionsButton
               objectName: "moreActionsButton"
@@ -4459,7 +4761,7 @@ Item {
                 moreActionsButton.forceActiveFocus()
             }
             function moveFocus(direction) {
-              var buttons = [activityAction, rescanAction, refreshAction, menuIndexStatus.toggleButton]
+              var buttons = [activityAction, rescanAction, refreshAction, outfitUpdateAction, menuIndexStatus.toggleButton]
               var current = buttons.findIndex(function(button) { return button.activeFocus })
               if (current < 0 && direction < 0) current = 0
               for (var step = 1; step <= buttons.length; step++) {
@@ -4549,6 +4851,17 @@ Item {
                   maintenanceMenu.dismiss(true)
                   root.service.refresh(root.service.currentQuery, root.service.currentCategory)
                 }
+              }
+              MaintenanceAction {
+                id: outfitUpdateAction
+                objectName: "outfitUpdateAction"
+                width: parent.width
+                label: "Update Outfit…"
+                iconKind: "refresh"
+                description: "Check versions and update this app."
+                Keys.forwardTo: [maintenanceActions]
+                enabled: Boolean(root.service) && !root.service.selfUpdateBusy
+                onClicked: root.openOutfitUpdate()
               }
               Text {
                 visible: Boolean(root.busySubtitle())
@@ -4738,7 +5051,7 @@ Item {
 
         BorderSurface {
           id: consentSurface
-          visible: !root.settingsOpen && (!root.service || !root.service.cacheLoaded)
+          visible: !root.settingsOpen && root.setupStage !== "updates" && (!root.service || !root.service.cacheLoaded)
           anchors.top: statusSurface.bottom
           anchors.topMargin: Style.space(14)
           anchors.left: parent.left
@@ -4818,7 +5131,7 @@ Item {
               ? parent.width : Math.max(Style.space(340), parent.width * 0.40)
             visible: !root.narrowWorkspace || !root.narrowDetailOpen
             clip: true
-            model: root.resultRows
+            model: root.sleeping ? [] : root.resultRows
             spacing: Style.space(8)
             currentIndex: root.selectedIndex
             boundsBehavior: Flickable.StopAtBounds
@@ -4953,7 +5266,7 @@ Item {
                       bordered: true
                       focusable: true
                       enabled: root.service && !root.operationPending(resultCard.modelData)
-                        && !root.service.batchRunning
+                        && !root.service.batchRunning && !root.service.selfUpdateBusy
                       onClicked: root.requestAction("install", resultCard.modelData)
                     }
                     Text {
@@ -5010,7 +5323,7 @@ Item {
                       foreground: Color.urgent
                       focusable: true
                       enabled: root.service && !root.operationPending(resultCard.modelData)
-                        && !root.service.batchRunning
+                        && !root.service.batchRunning && !root.service.selfUpdateBusy
                       onClicked: root.requestAction("remove", resultCard.modelData)
                     }
                   }
@@ -5534,7 +5847,7 @@ Item {
           id: quickSetupStatus
           visible: !root.settingsOpen && !root.interestsOpen && root.activeView === "setup"
             && root.service && root.service.cacheLoaded
-            && root.setupStage !== "browse"
+            && root.setupStage !== "browse" && root.setupStage !== "updates"
             && Boolean(root.service.error)
           anchors.top: workspaceHeader.bottom
           anchors.left: parent.left
@@ -5560,12 +5873,30 @@ Item {
         Item {
           id: quickSetupPage
           visible: !root.settingsOpen && !root.interestsOpen && root.activeView === "setup"
-            && root.service && root.service.cacheLoaded
+            && root.service && (root.service.cacheLoaded || root.setupStage === "updates")
           anchors.top: quickSetupStatus.visible ? quickSetupStatus.bottom : workspaceHeader.bottom
           anchors.topMargin: Style.space(10)
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.bottom: parent.bottom
+
+          UpdatesPage {
+            id: updatesPage
+            anchors.fill: parent
+            visible: root.setupStage === "updates"
+            active: root.uiAwake && visible && !setupDetailPanel.visible
+            enabled: !setupDetailPanel.visible
+            service: root.service
+            inventoryReady: root.canManagePlugins && Boolean(root.service && root.service.inventoryReady)
+            settingsTouched: root.settingsTouched
+            onBackRequested: root.leaveUpdates()
+            onCheckRequested: root.checkUpdates()
+            onUpdateRequested: function(row) { root.requestUpdate(row) }
+            onUpdateAllRequested: root.reviewAllUpdates()
+            onDetailRequested: function(row, invoker) { root.openSetupDetail(root.updateDetailRow(row), invoker) }
+            onProgressRequested: root.setupStage = "progress"
+            onPositionChanged: root.rememberPanel()
+          }
 
           Item {
             id: setupServicesPage
@@ -5809,7 +6140,7 @@ Item {
               }
               Button {
                 visible: root.service && root.service.batchItems && root.service.batchItems.length > 0
-                text: "Batch install progress"
+                text: root.updateBatch ? "Batch update progress" : "Batch install progress"
                 foreground: root.foreground
                 focusable: true
                 onClicked: root.setupStage = "progress"
@@ -5906,7 +6237,7 @@ Item {
                   spacing: Style.space(12)
                   Repeater {
                     id: discoveryRepeater
-                    model: root.discoveryRows
+                    model: root.sleeping ? [] : root.discoveryRows
                     SetupPluginCard {
                       required property var modelData
                       width: (discoveryGrid.width - discoveryGrid.spacing * (discoveryGrid.columns - 1)) / discoveryGrid.columns
@@ -6027,7 +6358,7 @@ Item {
                 }
                 Repeater {
                   id: matchesRepeater
-                  model: root.matchRows
+                  model: root.sleeping ? [] : root.matchRows
                   Column {
                     id: matchItem
                     required property var modelData
@@ -6799,6 +7130,7 @@ Item {
 
             HelpScrollView {
               id: setupCatalogScroll
+              objectName: "browseResultsScroll"
               anchors.top: setupBrowseControls.bottom
               anchors.topMargin: Style.space(10)
               anchors.left: parent.left
@@ -6812,13 +7144,15 @@ Item {
                 id: setupGroupsColumn
                 width: setupCatalogScroll.availableWidth
                 spacing: Style.space(14)
+                onPositioningComplete: root.scheduleThumbnailDemand()
 
                 Repeater {
                   id: setupGroupRepeater
-                  model: root.visibleSetupGroups()
+                  model: root.sleeping ? [] : root.visibleSetupGroups()
 
                   Column {
                     id: setupGroupCard
+                    onPositioningComplete: root.scheduleThumbnailDemand()
                     required property var modelData
                     readonly property var groupRows: root.setupRowsForGroup(modelData.id)
                     function cards() {
@@ -6885,6 +7219,9 @@ Item {
 
                     Grid {
                       id: setupCandidateGrid
+                      // Nested reflow can change which card tails intersect the
+                      // viewport without changing this grid's total height.
+                      onPositioningComplete: root.scheduleThumbnailDemand()
                       readonly property int gridColumns: root.browseDensity === "list" ? 1
                         : Presentation.cardColumns(width, root.minimumBrowseCardWidth, columnSpacing)
                       readonly property real cardWidth: (width
@@ -6917,13 +7254,12 @@ Item {
 
                   Button {
                     text: "Previous"
+                    objectName: "browsePreviousPage"
                     foreground: root.foreground
                     bordered: true
                     focusable: true
-                    enabled: root.service && root.service.setupPage > 1
-                    onClicked: root.requestSetup(
-                      setupSearchField.text.trim(), root.service.setupGroup,
-                      root.service.setupSort, root.service.setupPage - 1)
+                    enabled: root.service && !root.service.queryBusy && root.service.setupPage > 1
+                    onClicked: root.changeSetupPage(root.service.setupPage - 1)
                   }
                   Text {
                     height: parent.height
@@ -6937,14 +7273,13 @@ Item {
                   }
                   Button {
                     text: "Next"
+                    objectName: "browseNextPage"
                     foreground: root.foreground
                     bordered: true
                     focusable: true
-                    enabled: root.service
+                    enabled: root.service && !root.service.queryBusy
                       && root.service.setupPage < root.service.setupPageCount
-                    onClicked: root.requestSetup(
-                      setupSearchField.text.trim(), root.service.setupGroup,
-                      root.service.setupSort, root.service.setupPage + 1)
+                    onClicked: root.changeSetupPage(root.service.setupPage + 1)
                   }
                 }
 
@@ -7027,7 +7362,8 @@ Item {
 
             SetupDetailPanel {
               id: setupDetailPanel
-              visible: root.setupDetailRow !== null
+              parent: quickSetupPage
+              visible: root.setupDetailRow !== null && ["browse", "updates"].indexOf(root.setupStage) >= 0
               pluginRow: root.setupDetailRow
               width: parent.width
               anchors.top: parent.top
@@ -7112,7 +7448,7 @@ Item {
                 spacing: Style.space(8)
 
                 Repeater {
-                  model: root.setupSelectedRows
+                  model: root.sleeping ? [] : root.setupSelectedRows
 
                   BorderSurface {
                     id: setupReviewCard
@@ -7283,7 +7619,7 @@ Item {
                   bordered: true
                   focusable: true
                   enabled: root.setupSelectedCount > 0 && root.service
-                    && !root.service.mutationBusy
+                    && !root.service.mutationBusy && !root.service.selfUpdateBusy && !root.service.batchRunning
                   onClicked: root.batchConfirmOpen = true
                 }
               }
@@ -7304,12 +7640,13 @@ Item {
 
               Text {
                 width: parent.width
-                text: root.service && root.service.batchRunning
-                  ? "BATCH INSTALL IN PROGRESS"
+                objectName: "batchProgressHeading"
+                text: (root.updateBatch ? "BATCH UPDATE " : "BATCH INSTALL ") + (root.service && root.service.batchRunning
+                  ? "IN PROGRESS"
                   : (root.batchStatusCount(["queued"]) > 0
-                    ? "BATCH INSTALL PAUSED"
+                    ? "PAUSED"
                     : (root.batchStatusCount(["failed", "partial"]) > 0
-                      ? "BATCH INSTALL FINISHED WITH ATTENTION NEEDED" : "BATCH INSTALL COMPLETE"))
+                      ? "FINISHED WITH ATTENTION NEEDED" : "COMPLETE")))
                 textFormat: Text.PlainText
                 color: root.foreground
                 font.family: root.fontFamily
@@ -7360,7 +7697,7 @@ Item {
                 spacing: Style.space(8)
 
                 Repeater {
-                  model: root.service && Array.isArray(root.service.batchItems)
+                  model: !root.sleeping && root.service && Array.isArray(root.service.batchItems)
                     ? root.service.batchItems : []
 
                   BorderSurface {
@@ -7395,7 +7732,8 @@ Item {
                         }
                         Text {
                           id: setupProgressStatus
-                          text: root.service && (setupProgressRow.modelData.status === "running"
+                          text: root.updateBatch ? root.setupStatusLabel(setupProgressRow.modelData.status)
+                            : root.service && (setupProgressRow.modelData.status === "running"
                             || setupProgressRow.modelData.status === "completed")
                             ? root.service.pluginOutcome(setupProgressRow.modelData.id) : root.setupStatusLabel(setupProgressRow.modelData.status)
                           textFormat: Text.PlainText
@@ -7415,6 +7753,16 @@ Item {
                         font.family: root.fontFamily
                         font.pixelSize: root.supportingSize
                         wrapMode: Text.WordWrap
+                      }
+                      Text {
+                        visible: setupProgressRow.modelData.kind === "update"
+                        width: parent.width
+                        text: InspectorState.updateTransition(setupProgressRow.modelData)
+                        textFormat: Text.PlainText
+                        color: root.secondary
+                        font.family: root.fontFamily
+                        font.pixelSize: root.supportingSize
+                        wrapMode: Text.Wrap
                       }
                       Text {
                         visible: Boolean(setupProgressRow.modelData.installedRevision)
@@ -7454,7 +7802,8 @@ Item {
 
                 Button {
                   visible: root.service && root.service.batchRunning
-                  text: root.service.batchStopRequested ? "Stopping after current install" : "Stop after current install"
+                  text: (root.service.batchStopRequested ? "Stopping after current " : "Stop after current ")
+                    + (root.updateBatch ? "update" : "install")
                   foreground: Color.urgent
                   bordered: true
                   focusable: true
@@ -7464,36 +7813,40 @@ Item {
                 Button {
                   visible: root.service && !root.service.batchRunning
                     && root.batchStatusCount(["queued"]) > 0
-                  text: "Resume batch install"
+                  text: root.updateBatch ? "Resume batch update" : "Resume batch install"
                   foreground: root.foreground
                   bordered: true
                   focusable: true
                   enabled: !root.service.mutationActive && !root.service.mutationQueue.length
-                    && !root.service.hasCheckingOperations()
+                    && !root.service.hasCheckingOperations() && !root.service.selfUpdateBusy
+                    && (!root.updateBatch || root.updatesIdle)
                   onClicked: root.service.resumeSetupBatch()
                 }
                 Button {
                   visible: root.service && !root.service.batchRunning
                     && root.batchStatusCount(["failed", "partial"]) > 0
-                  text: "Retry failed installs"
+                  text: root.updateBatch ? "Retry failed updates" : "Retry failed installs"
                   foreground: root.foreground
                   bordered: true
                   focusable: true
                   enabled: !root.service.mutationActive && !root.service.mutationQueue.length
-                    && !root.service.hasCheckingOperations()
+                    && !root.service.hasCheckingOperations() && !root.service.selfUpdateBusy
+                    && (!root.updateBatch || root.updatesIdle)
                   onClicked: root.service.retrySetupBatch()
                 }
                 Button {
                   visible: root.service && !root.service.batchRunning
-                  text: "Back to " + (root.workspaceView === "discover" ? "Discover" : "Browse")
+                  text: "Back to " + (root.updateBatch ? "Updates" : root.workspaceView === "discover" ? "Discover" : "Browse")
+                  objectName: "batchBack"
                   foreground: root.foreground
                   focusable: true
                   enabled: !root.service.mutationActive && !root.service.mutationQueue.length
                     && !root.service.hasCheckingOperations()
                   onClicked: {
+                    var updates = root.updateBatch
                     if (root.service.resetSetupBatch()) {
-                      root.setupStage = "browse"
-                      root.queueCurrentSetup()
+                      root.setupStage = updates ? "updates" : "browse"
+                      if (!updates) root.queueCurrentSetup()
                     }
                   }
                 }
@@ -7503,7 +7856,134 @@ Item {
         }
       }
 
-      ConfirmDialog {
+      C.Popup {
+        id: updateReview
+        objectName: "updateReview"
+        parent: focusScope
+        popupType: C.Popup.Item
+        visible: root.updateReviewOpen
+        x: (parent.width - width) / 2
+        y: (parent.height - height) / 2
+        width: Math.min(Style.space(640), parent.width - Style.space(32))
+        height: Math.min(Style.space(540), parent.height - Style.space(32))
+        padding: Style.space(20)
+        modal: true
+        focus: true
+        closePolicy: C.Popup.CloseOnEscape
+        onOpened: cancelUpdateReview.forceActiveFocus()
+        onClosed: {
+          root.updateReviewOpen = false
+          Qt.callLater(function() {
+            if (!root.opened) return
+            if (setupDetailPanel.visible) setupDetailPanel.restorePosition(setupDetailPanel.scrollPosition(), "update")
+            else if (root.setupStage === "updates") updatesPage.takeFocus()
+          })
+        }
+        background: BorderSurface {
+          color: root.background
+          radius: Style.cornerRadius
+          borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+        }
+        contentItem: Item {
+          Column {
+            id: updateReviewHeading
+            width: parent.width
+            spacing: Style.space(8)
+            Text {
+              width: parent.width
+              text: root.updateBatchReview ? "Review " + root.reviewedUpdates.length + " eligible plugin updates"
+                : root.reviewedUpdates.length && root.reviewedUpdates[0].selfUpdate ? "Update Outfit & reopen" : "Review plugin update"
+              textFormat: Text.PlainText
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              wrapMode: Text.Wrap
+            }
+            Text {
+              width: parent.width
+              text: root.updateBatchReview ? "These plugins will update one at a time. Outfit is updated separately."
+                : root.reviewedUpdates.length && root.reviewedUpdates[0].selfUpdate
+                  ? "Outfit will close for its update and reopen with your current view."
+                  : "Update this installed plugin to the reviewed revision."
+              textFormat: Text.PlainText
+              color: root.secondary
+              font.family: root.fontFamily
+              font.pixelSize: root.readingSize
+              wrapMode: Text.Wrap
+            }
+          }
+          ContentScrollView {
+            id: updateReviewScroll
+            anchors.top: updateReviewHeading.bottom
+            anchors.topMargin: Style.space(16)
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.bottom: updateReviewFooter.top
+            anchors.bottomMargin: Style.space(16)
+            contentWidth: availableWidth
+            clip: true
+            C.ScrollBar.horizontal.policy: C.ScrollBar.AlwaysOff
+            Column {
+              width: updateReviewScroll.availableWidth
+              spacing: Style.space(16)
+              Repeater {
+                model: root.reviewedUpdates
+                Text {
+                  required property var modelData
+                  width: parent.width
+                  text: String(modelData.name || modelData.id) + "\n" + InspectorState.updateTransition(modelData)
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: root.readingSize
+                  wrapMode: Text.Wrap
+                }
+              }
+            }
+          }
+          Column {
+            id: updateReviewFooter
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+            spacing: Style.space(12)
+            Text {
+              objectName: "updateReviewError"
+              width: parent.width
+              visible: Boolean(text)
+              text: root.updateReviewError
+              textFormat: Text.PlainText
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: root.readingSize
+              wrapMode: Text.Wrap
+            }
+            Flow {
+              width: parent.width
+              spacing: Style.space(12)
+              Button {
+                id: cancelUpdateReview
+                objectName: "cancelUpdateReview"
+                text: "Cancel"
+                foreground: root.foreground
+                bordered: true; focusable: true
+                onClicked: root.updateReviewOpen = false
+              }
+              Button {
+                objectName: "confirmUpdates"
+                text: root.updateBatchReview ? "Update all (" + root.reviewedUpdates.length + ")"
+                  : root.reviewedUpdates.length && root.reviewedUpdates[0].selfUpdate ? "Update Outfit & reopen" : "Update"
+                foreground: root.foreground
+                bordered: true; focusable: true
+                enabled: root.updatesIdle && !root.updateReviewError
+                  && !(root.reviewedUpdates.length && root.reviewedUpdates[0].selfUpdate
+                    && (root.settingsTouched || (root.service && root.service.interestsDirty)))
+                onClicked: root.confirmUpdates()
+              }
+            }
+          }
+        }
+      }
+
+      ConfirmationDialog {
         id: actionConfirm
         anchors.fill: parent
         opened: root.actionConfirmOpen
@@ -7528,7 +8008,7 @@ Item {
         onConfirmed: root.confirmAction()
       }
 
-      ConfirmDialog {
+      ConfirmationDialog {
         id: batchConfirm
         anchors.fill: parent
         opened: root.batchConfirmOpen

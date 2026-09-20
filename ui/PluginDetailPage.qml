@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Ui
 import "Typography.js" as Typography
 import "Navigation.js" as Navigation
+import "InspectorState.js" as InspectorState
 
 // Presentation-only detail surface. Its owner supplies confirmed state and
 // handles requests; the fixture owner intentionally never calls native APIs.
@@ -18,6 +19,11 @@ FocusScope {
   readonly property real iconSize: Typography.icon(Style.font)
   readonly property real targetSize: Typography.target(Style.font)
   objectName: "pluginDetailPage"
+  property bool active: true
+  property var service: null
+  readonly property bool mediaActive: active && visible && !(service && service.sleeping === true)
+  property real savedScroll: 0
+  property bool scrollRestorePending: false
   property var pluginRow: ({})
   property var presentation: ({})
   property var mediaItems: []
@@ -42,6 +48,8 @@ FocusScope {
   signal reviewRequested()
   signal prototypeRequested()
   signal documentationRequested()
+  signal updateRequested()
+  signal updateCheckRequested()
 
   readonly property color foreground: Color.foreground
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.66)
@@ -160,7 +168,32 @@ FocusScope {
   function stopMedia() {
     if (mediaSlot.item && typeof mediaSlot.item.stopMedia === "function") mediaSlot.item.stopMedia()
   }
-  function scrollPosition() { return Number(contentScroll.contentItem.contentY || 0) }
+  function scrollPosition() { return active && !scrollRestorePending ? Number(contentScroll.contentItem.contentY || 0) : savedScroll }
+  function imageBucket(size) {
+    return Math.max(128, Math.min(4096, Math.ceil(Math.max(1, size) * Math.max(1, Screen.devicePixelRatio) / 128) * 128))
+  }
+  function invalidateImage(source) {
+    if (!source || !service || typeof service.invalidateThumbnail !== "function") return
+    var cached = service.thumbnails ? service.thumbnails[identity] : null
+    if (cached && String(cached.localSource || "") === String(source))
+      service.invalidateThumbnail(identity, String(source))
+  }
+  function restoreScroll() {
+    if (!active) return
+    if (pluginRow.readmeLoading === true) return
+    content.forceLayout()
+    contentScroll.contentItem.contentY = Math.max(0, Math.min(savedScroll,
+      contentScroll.contentItem.contentHeight - contentScroll.height))
+    scrollRestorePending = false
+  }
+  onActiveChanged: {
+    if (!active) scrollRestorePending = true
+    else detailScrollRestore.restart()
+  }
+  onPluginRowChanged: if (active && scrollRestorePending) detailScrollRestore.restart()
+  // Recreated document blocks need a polish pass before their height is known.
+  Timer { id: detailScrollRestore; interval: 1; onTriggered: root.restoreScroll() }
+  onMediaActiveChanged: if (!mediaActive) { stopMedia(); fullSize.close() }
   function isScrollKey(key) {
     return [Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown, Qt.Key_Home, Qt.Key_End].indexOf(key) >= 0
   }
@@ -185,7 +218,8 @@ FocusScope {
   }
   function focusTargets() {
     return {close:backButton, primary:primaryButton, actions:removeButton, uninstall:removeButton,
-      enabled:enabledSwitch, source:sourceButton, marketplace:marketplaceButton, batch:batchButton}
+      enabled:enabledSwitch, source:sourceButton, marketplace:marketplaceButton, batch:batchButton,
+      update:updateButton, updateCheck:updateCheckButton}
   }
   function focusName() {
     var targets = focusTargets()
@@ -195,6 +229,9 @@ FocusScope {
     return "close"
   }
   function restorePosition(y, focus) {
+    savedScroll = Math.max(0, Number(y) || 0)
+    if (!active || pluginRow.readmeLoading === true) scrollRestorePending = true
+    if (!active) return
     contentScroll.contentItem.contentY = Math.max(0, Math.min(Number(y) || 0,
       contentScroll.contentItem.contentHeight - contentScroll.height))
     if (!visible) return
@@ -212,6 +249,7 @@ FocusScope {
     descriptionExpanded = false
     selectedMedia = 0
     fullSize.close()
+    savedScroll = 0
     contentScroll.contentItem.contentY = 0
   }
   onIdentityChanged: resetView()
@@ -383,7 +421,7 @@ FocusScope {
     foreground: root.foreground
     fontSize: root.readingSize
     horizontalPadding: Style.space(12)
-    verticalPadding: Style.space(7)
+    verticalPadding: Style.space(root.compact && root.shortWindow ? 5 : 7)
     opacity: enabled ? 1 : 0.45
     Accessible.role: Accessible.Button
     Accessible.name: text
@@ -489,7 +527,7 @@ FocusScope {
         Caption {
           width: Math.min(metadataMetrics.advanceWidth(text) + Style.space(2), heading.width)
           text: [root.pluginRow.author ? "By " + root.pluginRow.author : "",
-            root.pluginRow.kind || "Plugin", root.pluginRow.version ? "v" + root.pluginRow.version : ""].filter(function(v) { return v }).join("  ·  ")
+            root.pluginRow.kind || "Plugin", root.pluginRow.version ? "Catalog v" + root.pluginRow.version : ""].filter(function(v) { return v }).join("  ·  ")
           maximumLineCount: 1
           elide: Text.ElideRight
         }
@@ -517,7 +555,13 @@ FocusScope {
       C.ScrollBar.horizontal.policy: C.ScrollBar.AlwaysOff
       Connections {
         target: contentScroll.contentItem
-        function onContentYChanged() { root.dismissMetricHelp() }
+        function onContentYChanged() {
+          root.dismissMetricHelp()
+          if (root.active && !root.scrollRestorePending) root.savedScroll = Number(contentScroll.contentItem.contentY || 0)
+        }
+        function onContentHeightChanged() {
+          if (root.active && root.scrollRestorePending) detailScrollRestore.restart()
+        }
       }
 
       Column {
@@ -605,7 +649,7 @@ FocusScope {
               id: mediaSlot
               width: parent.width
               height: item ? item.implicitHeight : 0
-              active: root.mediaComponent !== null
+              active: root.active && root.mediaComponent !== null
               sourceComponent: root.mediaComponent
             }
             Column {
@@ -624,12 +668,13 @@ FocusScope {
                 objectName: "detailPreview"
                 anchors.fill: parent
                 anchors.margins: Style.space(1)
-                source: root.currentMedia.source || ""
-                sourceSize.width: 1400
-                sourceSize.height: 900
+                source: root.mediaActive && visible ? root.currentMedia.source || "" : ""
+                sourceSize.width: root.imageBucket(width)
+                sourceSize.height: root.imageBucket(height)
                 fillMode: Image.PreserveAspectFit
                 asynchronous: true
-                activeFocusOnTab: status === Image.Ready
+                onStatusChanged: if (status === Image.Error) root.invalidateImage(source)
+                activeFocusOnTab: status === Image.Ready || activeFocus
                 onActiveFocusChanged: {
                   if (!activeFocus) return
                   var flick = contentScroll.contentItem
@@ -687,7 +732,7 @@ FocusScope {
               width: parent.width
               spacing: Style.space(8)
               Repeater {
-                model: root.mediaItems
+                model: root.active ? root.mediaItems : []
                 Action {
                   required property var modelData
                   required property int index
@@ -739,6 +784,30 @@ FocusScope {
         Column {
           width: parent.width
           spacing: Style.space(8)
+          Column {
+            objectName: "detailVersionSection"
+            visible: root.presentation.showVersions === true
+            width: parent.width
+            spacing: Style.space(6)
+            Caption { text: "VERSION"; font.bold: true; font.letterSpacing: 1 }
+            Copy {
+              objectName: "detailVersions"
+              width: parent.width
+              text: "Installed: " + InspectorState.versionLabel(root.presentation.installedVersion, root.presentation.installedRevision)
+                + (root.presentation.updateState === "customized" ? " · Local edits" : "")
+                + (root.presentation.availableVersion || root.presentation.availableRevision
+                  ? (root.presentation.updateState === "customized" ? "\nUpstream: " : "\nAvailable: ")
+                    + InspectorState.versionLabel(root.presentation.availableVersion, root.presentation.availableRevision)
+                  : root.presentation.updateState === "customized" ? "\nUpstream version unavailable" : "")
+                + (root.presentation.updateState !== "customized" && root.presentation.availableRevision
+                  && root.presentation.installedVersion && root.presentation.installedVersion === root.presentation.availableVersion
+                  && root.presentation.installedRevision !== root.presentation.availableRevision ? " · New changes" : "")
+              Accessible.role: Accessible.StaticText
+              Accessible.name: text
+            }
+            Caption { width: parent.width; text: root.presentation.updateStatus || "Update status unknown" }
+            Rule { width: parent.width }
+          }
           Flow {
             width: parent.width
             spacing: Style.space(8)
@@ -796,8 +865,8 @@ FocusScope {
           ReadmeDocument {
             visible: root.documentationExpanded
             width: parent.width
-            blocks: root.pluginRow.readmeBlocks || []
-            plainText: root.pluginRow.readmeText || ""
+            blocks: root.active && root.documentationExpanded ? root.pluginRow.readmeBlocks || [] : []
+            plainText: root.active && root.documentationExpanded ? root.pluginRow.readmeText || "" : ""
             loading: root.pluginRow.readmeLoading === true
             enrichmentEnabled: root.pluginRow.readmeEnrichment !== false
             onScrollRequested: function(event) { root.scrollPane(event, contentScroll, true) }
@@ -875,6 +944,9 @@ FocusScope {
           x: controlGroups.beside && settingsRow.visible ? settingsRow.width + controlGroups.groupGap : 0
           width: root.compact ? Math.min(parent.width, Math.max(primaryButton.implicitWidth,
             batchButton.visible ? batchButton.implicitWidth : 0,
+            updateCheckButton.visible ? updateCheckButton.implicitWidth : 0,
+            updateButton.visible ? updateButton.implicitWidth : 0,
+            primaryButton.visible && updateButton.visible ? primaryButton.implicitWidth + updateButton.implicitWidth + Style.space(8) : 0,
             removeButton.visible ? removeButton.implicitWidth : 0,
             root.controlTextWidth(root.localState) + Style.space(4))) : parent.width
           spacing: Style.space(8)
@@ -891,16 +963,43 @@ FocusScope {
               font.pixelSize: root.readingSize
             }
           }
-          Action {
-            id: primaryButton
-            objectName: "detailPrimary"
-            visible: Boolean(root.presentation.primaryLabel)
+          Flow {
+            id: primaryActions
             width: primaryRow.width
-            text: root.presentation.primaryLabel || ""
-            selected: true
+            spacing: Style.space(8)
+            readonly property bool beside: root.compact && primaryButton.visible && updateButton.visible
+              && width >= primaryButton.implicitWidth + updateButton.implicitWidth + spacing
+            Action {
+              id: primaryButton
+              objectName: "detailPrimary"
+              visible: Boolean(root.presentation.primaryLabel)
+              width: primaryActions.beside ? implicitWidth : primaryRow.width
+              text: root.presentation.primaryLabel || ""
+              selected: true
+              bordered: true
+              enabled: root.presentation.primaryEnabled === true
+              onClicked: root.primaryRequested()
+            }
+            Action {
+              id: updateButton
+              objectName: "detailUpdate"
+              visible: root.presentation.showUpdate === true
+              width: primaryActions.beside ? primaryActions.width - primaryButton.width - primaryActions.spacing : primaryRow.width
+              text: root.presentation.updateLabel || "Update"
+              bordered: true
+              enabled: root.presentation.canUpdate === true
+              onClicked: root.updateRequested()
+            }
+          }
+          Action {
+            id: updateCheckButton
+            objectName: "detailUpdateCheck"
+            visible: root.presentation.showUpdateCheck === true
+            width: primaryRow.width
+            text: root.presentation.updatesBusy ? "Checking for updates…" : "Check for updates"
+            enabled: root.presentation.canCheckUpdates === true
             bordered: true
-            enabled: root.presentation.primaryEnabled === true
-            onClicked: root.primaryRequested()
+            onClicked: root.updateCheckRequested()
           }
           Action {
             id: batchButton
@@ -1026,7 +1125,7 @@ FocusScope {
     focus: true
     closePolicy: C.Popup.CloseOnEscape
     onOpened: closePreview.forceActiveFocus()
-    onClosed: preview.forceActiveFocus()
+    onClosed: if (root.mediaActive) preview.forceActiveFocus()
     background: BorderSurface { color: Color.background; radius: Style.cornerRadius }
     contentItem: Item {
       Action {
@@ -1038,13 +1137,18 @@ FocusScope {
         onClicked: fullSize.close()
       }
       Image {
+        objectName: "detailFullSizeImage"
         anchors.top: closePreview.bottom
         anchors.topMargin: Style.space(12)
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        source: root.currentMedia.source || ""
+        source: root.mediaActive && fullSize.visible ? root.currentMedia.source || "" : ""
         fillMode: Image.PreserveAspectFit
+        asynchronous: true
+        sourceSize.width: root.imageBucket(width)
+        sourceSize.height: root.imageBucket(height)
+        onStatusChanged: if (status === Image.Error) root.invalidateImage(source)
       }
     }
   }

@@ -7,6 +7,17 @@ TestCase {
   name: "BackgroundProgress"
   when: windowShown
   Component { id: component; Plugin.BackgroundWorker { helperPath:"/fixture/helper.py" } }
+  Component {
+    id: reentrantComponent
+    Plugin.BackgroundWorker {
+      helperPath:"/fixture/helper.py"
+      property int completions: 0
+      onFinished: {
+        completions++
+        if (completions === 1) submit("second",{})
+      }
+    }
+  }
   SignalSpy { id: finals; signalName:"finished" }
   SignalSpy { id: updates; signalName:"progress" }
   function worker() {
@@ -53,6 +64,24 @@ TestCase {
     line(object, {ok:true})
     compare(finals.count, 1)
     verify(finals.signalArguments[0][0].ok)
+  }
+  function test_legacy_eof_finish_callback_cannot_complete_the_next_request() {
+    var object = createTemporaryObject(reentrantComponent,testCase)
+    finals.target = object; finals.clear()
+    verify(object.submit("first",{}))
+    var parser = findChild(object,"backgroundParser")
+    parser.read(JSON.stringify({ok:true,action:"first",generation:object.generation}))
+    exit(object)
+    var drain = findChild(object,"backgroundDrain")
+    drain.stop(); drain.triggered()
+    compare(object.completions,1)
+    compare(object.activeRequest.action,"second")
+    verify(object.active && !object.received)
+    parser.read(JSON.stringify({ok:true,action:"second",generation:object.generation}) + "\n")
+    exit(object)
+    compare(object.completions,2)
+    compare(finals.count,2)
+    verify(finals.signalArguments[0][0].ok && finals.signalArguments[1][0].ok)
   }
   function test_progress_only_eof_is_failure() {
     var object = worker()

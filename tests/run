@@ -24,6 +24,7 @@ if [[ "$mode" != --python-only ]]; then
   "$qmlformat" "$root/BarWidget.qml" >/dev/null
   "$qmlformat" "$root/ThumbnailLoader.qml" >/dev/null
   "$qmlformat" "$root/BackgroundWorker.qml" >/dev/null
+  "$qmlformat" "$root/BoundedJsonParser.qml" >/dev/null
   "$qmlformat" "$root/ui/OutfitApp.qml" >/dev/null
   "$qmlformat" "$root/ui/OutfitIcon.qml" >/dev/null
   "$qmlformat" "$root/ui/DiagnosticsPane.qml" >/dev/null
@@ -31,6 +32,8 @@ if [[ "$mode" != --python-only ]]; then
   "$qmlformat" "$root/ui/BackgroundActivity.qml" >/dev/null
   "$qmlformat" "$root/ui/InterestsManager.qml" >/dev/null
   "$qmlformat" "$root/ui/PluginDetailPage.qml" >/dev/null
+  "$qmlformat" "$root/ui/UpdatesPage.qml" >/dev/null
+  "$qmlformat" "$root/ui/ConfirmationDialog.qml" >/dev/null
   "$qmlformat" "$root/demo/DetailPrototype.qml" >/dev/null
   "$qmlformat" "$root/ui/OptionalVideo.qml" >/dev/null
   "$qmlformat" "$root/ui/DemoVideo.qml" >/dev/null

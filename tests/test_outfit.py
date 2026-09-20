@@ -778,17 +778,16 @@ class OutfitTests(unittest.TestCase):
         self.assertEqual(result["errorCode"], "inventory-unavailable")
         self.assertTrue(result["retryable"])
 
-    def test_oversized_request_is_drained_before_the_next_frame(self) -> None:
+    def test_oversized_request_read_is_bounded_without_draining_the_stream(self) -> None:
         next_request = b'{"action":"load","generation":2}\n'
         stream = io.BytesIO(b"x" * (OUTFIT.MAX_REQUEST_BYTES + 32) + b"\n" + next_request)
 
         oversized = OUTFIT.read_request(stream)
-        following = OUTFIT.read_request(stream)
-
         self.assertGreater(len(oversized), OUTFIT.MAX_REQUEST_BYTES)
-        self.assertEqual(following, next_request)
+        self.assertEqual(stream.tell(), OUTFIT.MAX_REQUEST_BYTES + 1)
+        # serve() terminates this invalid framing instead of draining forever.
 
-    def test_protocol_response_writes_unicode_as_utf8_without_ascii_expansion(self) -> None:
+    def test_protocol_response_escapes_unicode_for_bounded_chunk_framing(self) -> None:
         stream = io.BytesIO()
         stdout = mock.Mock(buffer=stream)
 
@@ -801,8 +800,9 @@ class OutfitTests(unittest.TestCase):
             })
 
         output = stream.getvalue()
-        self.assertIn("界".encode(), output)
-        self.assertNotIn(b"\\u754c", output)
+        self.assertTrue(output.isascii())
+        self.assertIn(b"\\u754c", output)
+        self.assertEqual(json.loads(output)["message"], "界")
         self.assertTrue(json.loads(output)["ok"])
 
     def test_protocol_response_escapes_lone_unicode_surrogates(self) -> None:
@@ -1098,9 +1098,12 @@ omarchy plugin add https://github.com/example/dock-helper
         with tempfile.TemporaryDirectory() as directory:
             store = OUTFIT.Store(Path(directory) / "cache")
             try:
+                OUTFIT.save_readmes(store, entries)
+                before = store.stamp("readmes.json")
                 with mock.patch.object(OUTFIT, "fetch_readme", return_value={"ok": False}):
                     fetched = OUTFIT.enrich_readmes(store, [target], entries)
                 restored = OUTFIT.load_readmes(store)
+                self.assertEqual(store.stamp("readmes.json"), before)
             finally:
                 store.close()
 
@@ -1622,6 +1625,7 @@ omarchy plugin add https://github.com/example/dock-helper
         with tempfile.TemporaryDirectory() as directory:
             plugin_root = Path(directory) / "omarchy" / "plugins" / "example.plugin"
             plugin_root.mkdir(parents=True)
+            (plugin_root / ".git").mkdir()
             with (
                 mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}),
                 mock.patch.object(OUTFIT, "run_command", return_value=("e" * 40 + "\n").encode()) as command,
@@ -1630,7 +1634,7 @@ omarchy plugin add https://github.com/example/dock-helper
 
         self.assertEqual(revision, "e" * 40)
         command.assert_called_once_with(
-            [OUTFIT.COMMANDS["git"], "-C", str(plugin_root), "rev-parse", "--verify", "HEAD"],
+            [OUTFIT.COMMANDS["git"], "--no-optional-locks", "-C", str(plugin_root), "rev-parse", "--verify", "HEAD"],
             5,
             256,
         )

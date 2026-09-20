@@ -1,6 +1,6 @@
 # Outfit technical guide
 
-This describes the new **0.2.0** build, whose plugin ID is
+This describes the **0.3.0** build, whose plugin ID is
 `io.github.ctl0v0.outfit`. Start with the [README](../README.md) or
 [user guide](USER_GUIDE.md) for everyday use. The version in the manifest does not
 imply that a Git tag, public source update, or search-pack release already exists.
@@ -27,6 +27,44 @@ does not run application-registration hooks. Native plugin registration uses
 `$HOME/.config/omarchy/plugins`; Outfit's private data uses the XDG roots below.
 
 ## Startup and helper architecture
+
+### Idle lifecycle and bounded IPC
+
+The closed-window grace period is 30 seconds. Optional workers pause immediately
+on close, while saves and native mutation/verification retain ownership until
+completion. Sleep terminates the persistent query process, clears presentation
+rows/README/media/thumbnail state, and marks inventory unconfirmed for reopening.
+The small hosted service retains user intent and bounded configuration metadata.
+Fast reopen waits for any retiring PID before reusing its process slot. Cancelled
+startup lanes rearm after their old process exits. Hardware polling is open-only;
+update and indexing timers use actual due times rather than constant idle checks.
+
+`BoundedJsonParser.qml` receives raw `SplitParser` chunks with `splitMarker: ""`,
+bounding partial lines before delivery. The backend emits ASCII-escaped JSON to
+preserve Unicode across arbitrary native chunk boundaries. Owner deactivation
+releases partial buffers. Generation/action validation precedes request completion,
+and EOF continuations recheck their owner after a finish callback can submit a new
+request. Oversized unterminated stdin frames terminate the serving helper instead
+of entering an unbounded drain loop. Completed response envelopes are released.
+
+Progress-only batch-journal writes coalesce for 250 ms; semantic operation states
+flush immediately. Host runtime annotations publish together. Updates use target-only
+Git/version inspection around mutations while retaining fresh authoritative
+presence/enabled/placement checks. README cache changes merge under a lock, and
+preview discovery reads that cache lazily. Image failures have URL/revision backoff.
+Search-pack refreshes skip unchanged assets only when receipt and catalog/index
+coverage still agree; removed documents also remove their attribution rows.
+
+The Updates list is virtualized; hidden/sleeping pages release delegates. Browse
+uses one active list/grid layout, event-driven thumbnail demand, and coalesced
+scroll snapshots. Image decode sizes are bounded buckets and full-size previews
+load asynchronously only when needed. Virtual-table context is ID-based and
+bounded when persisted; an image decode failure invalidates only its current URI.
+
+Measured results and scope are in [backend performance evidence](../tests/PERFORMANCE_RESULTS.md)
+and [native lifecycle evidence](../tests/vm/PERFORMANCE_RESULTS.md). Repeated working
+queries improved substantially in the synthetic benchmark; cold requests, broad
+query rotation, and page-only changes did not demonstrate a general speedup.
 
 The singleton service coordinates a persistent interactive query helper,
 background scan/enrichment workers, a low-priority README indexing worker,
@@ -55,6 +93,71 @@ audio devices, and selected installed capabilities. Inventory comes from
 `omarchy plugin list --json`, with bar sections from local Omarchy configuration.
 The raw profile remains in memory. Failed probes retain last-confirmed in-memory
 observations as stale; successful checks can establish disappearance.
+
+## Browse preview fallback
+
+The thumbnail lane uses marketplace images first, then suitable README screenshots
+when both `marketplaceThumbnails` and `readmeEnrichment` are enabled. README
+discovery uses the exact listing commit and existing media allowlists; repository
+links are rebound to that same repository/revision. It does not change query/search
+membership or fetch documentation synchronously in the interactive query worker.
+The optional preview lane can make README requests as displayed search results
+change. Existing current-revision media metadata is reused when available.
+
+`thumbnail-readmes.json` is an owner-only, bounded 256-entry / 2 MiB metadata cache
+keyed by repository and full SHA. Successful discovery (including genuine absence)
+is retained for 24 hours; README transport failures back off for five minutes.
+Image files share the existing 64 MiB/256-file thumbnail cache. Four workers share
+a 32-second batch budget and try at most three image candidates per README.
+Deferred work is retried separately from failures. Generation, repository, and
+revision checks prevent late results from displaying under a different listing;
+disabling enrichment immediately removes README-derived previews.
+
+## Installed-plugin updates
+
+`check-updates` runs in a dedicated background lane, independent of browsing,
+README indexing, and mutations. Local inventory carries `installedVersion` and
+`installedRevision`; catalog `version` remains listing metadata. The owner-only
+`plugin-updates.json` cache binds reviewed targets to local repository identity,
+origin/config digest, manifest and clean HEAD. Successful checks expire after six
+hours; unavailable checks after five minutes. Four workers share a bounded check
+deadline. Public remote HEAD discovery uses anonymous, read-only HTTPS Git
+`ls-remote` outside installed repositories, with credential helpers and inherited
+Git configuration disabled. Pinned manifests come from `raw.githubusercontent.com`;
+only differing revisions need GitHub's compare API for fast-forward evidence.
+
+Checkout eligibility is separate from remote metadata: `customized` records can
+carry upstream versions/revisions while always keeping `canUpdate: false`.
+They do not need a compare-API request, since no automatic mutation is offered.
+Their cache binds the local manifest/HEAD/source and Git-status digest; cleaning
+the checkout invalidates that record. Remote failures on customized records use
+`checkError` while retaining the customization state and five-minute retry.
+Unsupported sources are `manual`, not failed network checks. `updatesError` is
+reserved for whole-check failures; `updatesUnavailableCount` reports partial
+coverage without converting all rows into errors.
+
+`update-plugin` requires both reviewed full SHAs, confirmed inventory and a
+matching cached source identity. It rechecks the target before invoking
+`omarchy plugin update <id> --yes`, then verifies the resulting revision, version,
+enabled state and bar placement. Native Omarchy cannot pin the update SHA; remote
+movement during execution is reported as unverified rather than silently claiming
+the reviewed version was installed. Native validation/rollback remains authoritative.
+Update batches use the existing serialized mutation queue and recovery journal,
+with explicit `kind: update` records (up to 2,000, the inventory bound) and retained
+reviewed revisions. Ordinary install selections and the 50-plugin install limit
+are independent of update batches.
+
+`self-update` and `self-update-status` use `scripts/self_update.py`. Explicit
+self-update stages the installed, committed helper/backend into an owner-only
+cache generation, then starts `outfit-self-update.service` via user `systemd-run`.
+The independent worker survives plugin replacement and shell restart. Receipts
+are bounded, atomic and checked against operation identity; pending receipts
+expire after five minutes and terminal receipts after 24 hours. Navigation and
+geometry are allowlisted; raw hardware, credentials and unsaved drafts are not
+copied. Successful verification precedes `omarchy-restart-shell` and canonical
+summon IPC. Completed means summon accepted, not independently confirmed rendering.
+The feature requires user systemd and the existing trusted session runtime;
+it does not install a permanent daemon or request elevated privileges.
 
 ## Matching, search, and presentation
 
@@ -126,7 +229,7 @@ https://github.com/ctl0v0/outfit/releases/download/search-pack/latest.json
 
 Source and assets may be published separately. Until compatible pack assets are
 available, the pack stage can report unavailable and use progressive local
-indexing. No `v0.2.0` tag is assumed by these instructions.
+indexing. No release tag is assumed by these instructions.
 
 The current preparation measurements for this build (2026-09-18) are:
 

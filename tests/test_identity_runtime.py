@@ -16,7 +16,7 @@ class IdentityRuntimeTests(unittest.TestCase):
         document = json.loads((ROOT / "manifest.json").read_text())
         identity = document["id"]
         self.assertEqual(identity, "io.github.ctl0v0.outfit")
-        self.assertEqual(document["version"], "0.2.0")
+        self.assertEqual(document["version"], "0.3.0")
         self.assertEqual({launcher.ID, migrate_identity.NEW, outfit.APP_ID}, {identity})
         service = (ROOT / "Service.qml").read_text()
         self.assertIn(f'target: "{identity}"', service)
