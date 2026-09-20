@@ -949,7 +949,7 @@ FocusScope {
             primaryButton.visible && updateButton.visible ? primaryButton.implicitWidth + updateButton.implicitWidth + Style.space(8) : 0,
             removeButton.visible ? removeButton.implicitWidth : 0,
             root.controlTextWidth(root.localState) + Style.space(4))) : parent.width
-          spacing: Style.space(8)
+          spacing: Style.space(root.compact && root.shortWindow ? 6 : 8)
           Column {
             width: primaryRow.width
             spacing: Style.space(4)
