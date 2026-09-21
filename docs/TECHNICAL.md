@@ -1,6 +1,6 @@
 # Outfit technical guide
 
-This describes the **0.3.1** build, whose plugin ID is
+This describes the **0.3.2** build, whose plugin ID is
 `io.github.ctl0v0.outfit`. Start with the [README](../README.md) or
 [user guide](USER_GUIDE.md) for everyday use. The version in the manifest does not
 imply that a Git tag, public source update, or search-pack release already exists.
@@ -136,12 +136,32 @@ Unsupported sources are `manual`, not failed network checks. `updatesError` is
 reserved for whole-check failures; `updatesUnavailableCount` reports partial
 coverage without converting all rows into errors.
 
-`update-plugin` requires both reviewed full SHAs, confirmed inventory and a
-matching cached source identity. It rechecks the target before invoking
-`omarchy plugin update <id> --yes`, then verifies the resulting revision, version,
-enabled state and bar placement. Native Omarchy cannot pin the update SHA; remote
-movement during execution is reported as unverified rather than silently claiming
-the reviewed version was installed. Native validation/rollback remains authoritative.
+`update-plugin` requires both user-confirmed full SHAs, confirmed inventory and a
+matching cached source identity. The shared `reviewed_repository` helper fetches
+and verifies the exact target in private staging outside plugin discovery, also
+used by marketplace installation. Before native mutation, `update_reviewed_plugin`
+checks staged manifest identity/version, proves fast-forward ancestry using fetched
+Git objects, and rechecks installed source/configuration, cleanliness and placement.
+
+Native Omarchy has no revision argument. Outfit therefore gives its Git subprocesses
+an exact, process-only `url.<verified-stage>.insteadOf=<installed-origin>` mapping.
+It verifies the effective origin resolves solely to that stage, allows only local
+file transport, disables hooks/credentials/inherited configuration/submodule recursion,
+and invokes `omarchy plugin update <id> --yes`. Remote HEAD can move without changing
+the code supplied to the native updater. The installed `.git/config` and public origin
+are never temporarily rewritten. Native fast-forward/validation/rollback and shell
+reconciliation remain authoritative; final revision/version/enabled/placement checks
+still gate success. There is no moving-HEAD fallback or post-execution reset to the
+user-confirmed SHA.
+
+Git configuration capable of executing filters or custom transport helpers is
+rejected before status inspection. URL rewrites, replacement refs, alternates,
+partial clones and shared worktrees are unsupported by automatic updates. These
+checks preserve existing files and report a blocked/manual source rather than
+silently altering its configuration.
+
+Update targets are explicitly user-confirmed upstream commits; this does not
+assert that a newer upstream commit has received marketplace maintainer approval.
 Update batches use the existing serialized mutation queue and recovery journal,
 with explicit `kind: update` records (up to 2,000, the inventory bound) and retained
 reviewed revisions. Ordinary install selections and the 50-plugin install limit
@@ -150,7 +170,8 @@ are independent of update batches.
 `self-update` and `self-update-status` use `scripts/self_update.py`. Explicit
 self-update stages the installed, committed helper/backend into an owner-only
 cache generation, then starts `outfit-self-update.service` via user `systemd-run`.
-The independent worker survives plugin replacement and shell restart. Receipts
+The independent worker uses the same pinned-update helper before any source replacement;
+it survives plugin replacement and shell restart. Receipts
 are bounded, atomic and checked against operation identity; pending receipts
 expire after five minutes and terminal receipts after 24 hours. Navigation and
 geometry are allowlisted; raw hardware, credentials and unsaved drafts are not
@@ -158,6 +179,9 @@ copied. Successful verification precedes `omarchy-restart-shell` and canonical
 summon IPC. Completed means summon accepted, not independently confirmed rendering.
 The feature requires user systemd and the existing trusted session runtime;
 it does not install a permanent daemon or request elevated privileges.
+
+Focused update pinning evidence and mocked/native boundaries are recorded in
+[pinned-update results](../tests/PINNED_UPDATE_RESULTS.md).
 
 ## Matching, search, and presentation
 

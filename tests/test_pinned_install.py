@@ -26,7 +26,7 @@ class PinnedInstallTests(unittest.TestCase):
         self.home.mkdir()
         self.remote = self.root / "remote"
         self.remote.mkdir()
-        self.identity = "example.pinned"
+        self.identity = getattr(self, "identity", "example.pinned")
         self.repository = "https://github.com/example/pinned"
         self.target = self.home / ".config/omarchy/plugins" / self.identity
         self.git_env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root),

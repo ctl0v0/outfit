@@ -21,6 +21,14 @@ unavailable commits fail closed, without a moving-HEAD fallback. This boundary
 does not sandbox the reviewed plugin or certify its behavior after activation.
 See [implementation and tests](tests/PINNED_INSTALL_RESULTS.md).
 
+Ordinary in-app updates and the detached self-update worker share the same
+pre-execution pinning boundary for the user-confirmed target SHA. The native
+updater can fetch only from a verified local snapshot, using a process-only Git
+mapping with network transports disabled. The installed origin/configuration is
+not temporarily changed. Executable Git configuration is rejected before status
+inspection; source, fast-forward ancestry and placement are checked before native
+mutation. See [update regression evidence](tests/PINNED_UPDATE_RESULTS.md).
+
 Review `scripts/outfit.py`, `Service.qml`, `BackgroundWorker.qml`,
 `ThumbnailLoader.qml`, and the media components when changing those boundaries.
 New network hosts, subprocesses, write locations or automatic actions require

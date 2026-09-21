@@ -62,7 +62,7 @@ You need **Omarchy 4.0.4 with Quattro** and Python 3.12 or newer. A normal stock
 installation is sufficient. Internet access is needed for updates and downloads;
 video playback support is optional.
 
-Outfit **0.3.1** is an early testing release. The bundled catalog lets you start
+Outfit **0.3.2** is an early testing release. The bundled catalog lets you start
 browsing while the searchable documentation library downloads in the background.
 
 Marketplace installs through Outfit use the catalog's exact reviewed commit.
@@ -132,7 +132,11 @@ settings; pausing documentation updates keeps already cached text searchable.
 ## Update
 
 In Outfit, open **⋯ More actions → Update Outfit…** to check versions and use
-**Update Outfit & reopen**. For an installation already using the new identity,
+**Update Outfit & reopen**. In-app plugin updates and self-update fetch and verify
+the full commit SHA you confirmed before native code replacement. Upstream
+movement cannot substitute a newer commit during the native fetch.
+
+For an installation already using the new identity,
 you can also update from the terminal:
 
 ```bash

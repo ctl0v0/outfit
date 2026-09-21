@@ -69,6 +69,19 @@ class PluginUpdateTests(unittest.TestCase):
         self.inventory_patch = mock.patch.object(app, "scan_inventory", side_effect=self.inventory)
         self.inventory_patch.start()
         self.addCleanup(self.inventory_patch.stop)
+        # Transaction/state tests model the pinned mutator. Real fetch, pinning
+        # and native updater execution are exercised in test_pinned_update.py.
+        self.pinned_patch = mock.patch.object(app, "update_reviewed_plugin", side_effect=self.pinned_update)
+        self.pinned_mock = self.pinned_patch.start()
+        self.addCleanup(self.pinned_patch.stop)
+
+    def pinned_update(self, item, local, expected, version):
+        self.assertEqual(item["id"], self.identity)
+        self.assertEqual(local["installedRevision"], self.before)
+        self.assertEqual(expected, self.candidate)
+        self.assertEqual(version, self.remote_version)
+        self.assertTrue(local["sourceKey"])
+        return self.command([app.COMMANDS["omarchy"], "plugin", "update", self.identity, "--yes"], 90, 128 * 1024)
 
     def git(self, *args):
         # Every actual Git subprocess is constrained to a fresh temporary repo.
@@ -637,6 +650,7 @@ class PluginUpdateTests(unittest.TestCase):
                           "expectedRevision": self.candidate, "expectedInstalledRevision": self.before,
                           "batchItem": True, "streamProgress": True}, self.store, now=1001, progress=progress.append)
         operation = result["operation"]
+        self.pinned_mock.assert_called_once()
         self.assertEqual(len(self.native_calls), 1)
         self.assertTrue(operation["observed"])
         self.assertTrue(operation["verified"])
@@ -768,7 +782,7 @@ class PluginUpdateTests(unittest.TestCase):
         self.assertEqual(result["operation"]["installedRevision"], self.before)
         self.assertIn("rolled back", result["error"])
 
-    def test_late_movement_and_noop_are_not_success(self):
+    def test_corrupt_native_result_and_noop_are_not_success(self):
         for mode in ("late", "noop", "failure-after-merge", "placement", "disabled"):
             with self.subTest(mode=mode):
                 self.git("reset", "--hard", self.before)
@@ -780,7 +794,7 @@ class PluginUpdateTests(unittest.TestCase):
                 self.assertNotEqual(result["operation"]["status"], "completed")
                 self.assertTrue(result["error"])
                 if mode == "late":
-                    self.assertIn("remote may have moved", result["error"])
+                    self.assertIn("differs from the pinned target", result["error"])
 
     def test_mutation_observation_requires_target_revision_and_version(self):
         item = self.inventory()[0][0]

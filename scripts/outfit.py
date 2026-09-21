@@ -2288,25 +2288,15 @@ def verify_reviewed_install(identity: str, revision: str, repository: str) -> No
         raise ValueError("The reviewed installation's upstream origin is not confirmed.")
 
 
-def install_reviewed_plugin(item: dict[str, Any], revision: str) -> bytes:
-    """Install only a checked-out, verified catalog commit through native Omarchy.
-
-    Staging is private and outside plugin discovery. Nothing from the remote is
-    executed here. In particular, never install HEAD and reset it afterwards.
-    """
-    identity, repository = item.get("id"), item.get("repo")
+@contextmanager
+def reviewed_repository(identity: str, repository: str, revision: str):
+    """Private, verified snapshot shared by install, update and self-update."""
     parsed = github_repo(repository)
     if (not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision)
-            or revision != item.get("listingCommit") or not parsed or parsed[2] != repository
+            or not parsed or parsed[2] != repository
             or any(part in {".", ".."} for part in parsed[:2])
             or not identity or plugin_id(identity) != identity):
-        raise ValueError("Installation requires the exact reviewed catalog source and full commit SHA.")
-    target = plugin_install_path(identity)
-    if (target != Path.home() / ".config/omarchy/plugins" / identity
-            or target.parent.resolve() != target.parent.absolute()):
-        raise ValueError("The native installer does not support this plugin configuration directory.")
-    if os.path.lexists(target):
-        raise ValueError("The selected plugin is already installed.")
+        raise ValueError("The exact reviewed source and full commit SHA are required.")
     # Ignore TMPDIR: a caller-controlled location might itself be watched by the shell.
     with tempfile.TemporaryDirectory(prefix="outfit-reviewed-", dir="/tmp") as directory:
         stage = Path(directory)
@@ -2320,6 +2310,21 @@ def install_reviewed_plugin(item: dict[str, Any], revision: str) -> bytes:
         verify_install_checkout(stage, identity, revision)
         run_command([COMMANDS["omarchy"], "plugin", "validate", str(stage)], 15, 32 * 1024)
         verify_install_checkout(stage, identity, revision)
+        yield stage
+
+
+def install_reviewed_plugin(item: dict[str, Any], revision: str) -> bytes:
+    """Never install moving HEAD and reset it afterwards."""
+    identity, repository = item.get("id"), item.get("repo")
+    if not revision or revision != item.get("listingCommit"):
+        raise ValueError("Installation requires the exact reviewed catalog source and full commit SHA.")
+    target = plugin_install_path(identity)
+    if (target != Path.home() / ".config/omarchy/plugins" / identity
+            or target.parent.resolve() != target.parent.absolute()):
+        raise ValueError("The native installer does not support this plugin configuration directory.")
+    if os.path.lexists(target):
+        raise ValueError("The selected plugin is already installed.")
+    with reviewed_repository(identity, repository, revision) as stage:
         # Keep Git hardening in the environment for the native installer's children.
         # Only our generated absolute path is handed off; request URLs/paths never are.
         argv, environment = command_launch([COMMANDS["omarchy"], "plugin", "add", str(stage), "--yes"])
@@ -2343,6 +2348,60 @@ def install_reviewed_plugin(item: dict[str, Any], revision: str) -> bytes:
         if native_error is not None:
             raise ValueError("The reviewed commit was installed, but native completion needs verification.") from native_error
         return output
+
+
+def update_reviewed_plugin(item: dict[str, Any], local: dict[str, Any],
+                           expected: str, version: str) -> bytes:
+    """Give the native updater an immutable, prevalidated local origin for this process only.
+
+    No installed config rewrite or post-execution reset: fetch origin HEAD can
+    reach only the staged reviewed commit. This also serves the detached worker.
+    Callers own the mutation lock and final inventory/revision reconciliation.
+    """
+    item, local = dict(item), dict(local)
+    identity, repository = item["id"], local["repository"]
+    before = full_sha(local.get("installedRevision"))
+    if not before or before != local.get("installedRevision") or not local.get("sourceKey"):
+        raise ValueError("The reviewed installed source is unavailable.")
+    target = plugin_install_path(identity)
+    if target != Path.home() / ".config/omarchy/plugins" / identity:
+        raise ValueError("The native updater does not support this plugin configuration directory.")
+    with reviewed_repository(identity, repository, expected) as stage:
+        manifest = update_manifest(install_git(stage, ["show", f"{expected}:manifest.json"],
+                                               maximum=MAX_UPDATE_MANIFEST_BYTES), identity)
+        if manifest["version"] != version:
+            raise ValueError("The staged manifest differs from the reviewed update.")
+        # The fetched history, rather than only remote compare metadata, must
+        # prove that this is a fast-forward from the approved installed commit.
+        install_git(stage, ["merge-base", "--is-ancestor", before, expected])
+        inventory, unavailable = scan_inventory(include_versions=False)
+        current_item = next((row for row in inventory if row["id"] == identity), None)
+        if (unavailable or not current_item or current_item.get("firstParty")
+                or current_item.get("enabled") != item.get("enabled")
+                or current_item.get("barSectionKnown") is not True
+                or current_item.get("barSection") != item.get("barSection")):
+            raise ValueError("Plugin state changed while preparing the reviewed update.")
+        current = inspect_update_target(current_item)
+        if (current["state"] != "ready" or current["sourceKey"] != local["sourceKey"]
+                or current["repository"] != repository or current["installedRevision"] != before):
+            raise ValueError("The installed source changed while preparing the reviewed update.")
+        origin = update_git(target, ["config", "--get-all", "remote.origin.url"]).decode().strip()
+        argv, environment = command_launch([COMMANDS["omarchy"], "plugin", "update", identity, "--yes"])
+        safe_git = install_git_environment(stage, "file")
+        # remote.origin.url is multi-valued in Git: appending a command-scope URL
+        # does NOT safely replace its first local value. Use an exact, verified
+        # process-only insteadOf mapping, with every network transport denied.
+        index = int(safe_git["GIT_CONFIG_COUNT"])
+        safe_git.update(GIT_CONFIG_COUNT=str(index + 1))
+        safe_git[f"GIT_CONFIG_KEY_{index}"] = f"url.{stage}.insteadOf"
+        safe_git[f"GIT_CONFIG_VALUE_{index}"] = origin
+        environment.update({key: value for key, value in safe_git.items()
+                            if key.startswith("GIT_") or key == "SSH_ASKPASS"})
+        resolved = run_bounded_process([COMMANDS["git"], "-C", str(target), "remote", "get-url", "--all", "origin"],
+                                       environment, 5, 4096, cwd=str(stage)).decode().strip()
+        if resolved != str(stage):
+            raise ValueError("The native updater could not be bound to the reviewed local source.")
+        return run_bounded_process(argv, environment, 90, 128 * 1024, cwd=str(stage))
 
 
 def run_activation_command(argv: list[str], observed: dict[str, Any] | None = None) -> bytes:
@@ -3111,6 +3170,23 @@ def inspect_update_target(item: dict[str, Any], deadline: float | None = None) -
         result["installedVersion"] = manifest["version"]
         if not (target / ".git").is_dir():
             return {**result, "state": "manual", "reason": "This plugin is not a Git installation. Update it using its original installation method."}
+        if any(os.path.lexists(target / ".git" / name) for name in
+               ("commondir", "worktrees", "objects/info/alternates", "info/grafts")):
+            return {**result, "state": "blocked", "reason": "Automatic updates require a self-contained Git checkout."}
+        # Check executable Git configuration BEFORE status can invoke a clean
+        # filter. Native pinning relies on this source/config digest remaining
+        # unchanged during staging. Installed local config is not fetched data.
+        config = update_git(target, ["config", "--null", "--list"], deadline)
+        for entry in config.split(b"\0"):
+            key = entry.split(b"\n", 1)[0].lower()
+            if (key.startswith((b"filter.", b"merge.", b"include.", b"includeif.", b"url.", b"submodule.", b"extensions."))
+                    or key in {b"core.worktree", b"core.sshcommand", b"core.gitproxy", b"core.alternaterefscommand"}
+                    or (key.startswith(b"remote.") and key.rsplit(b".", 1)[-1]
+                        in {b"vcs", b"uploadpack", b"receivepack", b"proxy", b"promisor", b"partialclonefilter"})):
+                return {**result, "state": "manual" if key.startswith(b"url.") else "blocked",
+                        "reason": "This checkout uses Git configuration unsupported by automatic updates."}
+        if update_git(target, ["for-each-ref", "--format=%(refname)", "refs/replace/"], deadline):
+            return {**result, "state": "blocked", "reason": "Git replacement objects are unsupported for automatic updates."}
         top = update_git(target, ["rev-parse", "--show-toplevel"], deadline).decode().strip()
         if top != str(target):
             return {**result, "state": "blocked", "reason": "Plugin repository layout is unsupported."}
@@ -3134,7 +3210,6 @@ def inspect_update_target(item: dict[str, Any], deadline: float | None = None) -
             return {**result, "state": "blocked", "reason": "The checkout uses hidden worktree changes or sparse-checkout flags."}
         # A whole effective-config digest catches source/configuration changes
         # without persisting credentials or arbitrary Git configuration text.
-        config = update_git(target, ["config", "--null", "--list"], deadline)
         info = target.stat()
         evidence = json.dumps([str(target), info.st_dev, info.st_ino, revision,
                                 manifest, origin], sort_keys=True).encode() + config + dirty
@@ -3527,9 +3602,8 @@ def execute_plugin_update(request: dict[str, Any], store: Store, now: float,
                 or fresh["availableRevision"] != expected
                 or fresh["availableVersion"] != reviewed["record"].get("availableVersion")):
             raise ValueError("The remote target changed or could not be verified; check updates and review again.")
-        # Re-read source/cleanliness after network IO, immediately before native
-        # dispatch. Native has no pinned-revision argument: a later remote move
-        # is detected from resulting HEAD, never reported as reviewed success.
+        # Re-read source/cleanliness after network IO. The shared pinned helper
+        # checks again after staging, before native fetch can reach any code.
         latest_inventory, latest_unavailable = scan_inventory(include_versions=False)
         latest_target = next((item for item in latest_inventory if item["id"] == identity), None)
         if (latest_unavailable or latest_target is None or latest_target.get("firstParty")
@@ -3543,7 +3617,7 @@ def execute_plugin_update(request: dict[str, Any], store: Store, now: float,
         phase("updating")
         command_failed = False
         try:
-            run_command([COMMANDS["omarchy"], "plugin", "update", identity, "--yes"], 90, 128 * 1024)
+            update_reviewed_plugin(latest_target, latest, expected, fresh["availableVersion"])
         except (OSError, TimeoutError, ValueError):
             command_failed = True
         phase("verifying")
@@ -3563,7 +3637,7 @@ def execute_plugin_update(request: dict[str, Any], store: Store, now: float,
             if command_failed and observed and observed["installedRevision"] == installed:
                 error = "Omarchy did not complete the update; the original revision remains installed (the update may have been rolled back)."
             elif observed and observed["installedRevision"] and observed["installedRevision"] not in {installed, expected}:
-                error = "The installed revision differs from the reviewed target; the remote may have moved during the native update. Check updates again."
+                error = "The installed revision differs from the pinned target; the native result is not verified. Check updates again."
             elif command_failed:
                 error = "The native update failed or timed out; its final result is not verified. Check inventory and updates again."
             else:

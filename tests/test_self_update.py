@@ -84,8 +84,18 @@ class SelfUpdateTests(unittest.TestCase):
         self.mode = "success"
         self.readiness_failures = 0
         self.command_mock = self.patch(mock.patch.object(worker, "_command", side_effect=self.command))
+        self.pinned_mock = self.patch(mock.patch.object(app, "update_reviewed_plugin", side_effect=self.pinned_update))
         self.patch(mock.patch.object(worker, "ACK_TIMEOUT", 0))
         self.review()
+
+    def pinned_update(self, item, local, expected, version):
+        self.assertEqual(item["id"], app.APP_ID)
+        self.assertEqual(local["installedRevision"], self.before)
+        self.assertEqual(expected, self.after)
+        self.assertEqual(version, self.remote_version)
+        self.assertTrue(local["sourceKey"])
+        return worker._command([str(self.runtime / "bin/omarchy"), "plugin", "update", app.APP_ID, "--yes"],
+                               worker._runtime(app), 90)
 
     def patch(self, patcher):
         value = patcher.start()
@@ -283,6 +293,7 @@ class SelfUpdateTests(unittest.TestCase):
     def test_success_writes_verified_receipt_before_restart_and_summons_once(self):
         self.launch(resumePayload={"view": "setup", "query": "audio", "windowWidth": 900})
         code, result = self.work()
+        self.pinned_mock.assert_called_once()
         self.assertEqual(code, 0)
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["installedRevision"], self.after)
@@ -470,11 +481,11 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual(self.launch()["state"], "blocked")
         self.assertFalse(self.commands)
 
-    def test_git_executable_configuration_is_rejected_even_if_reviewed(self):
+    def test_git_executable_configuration_blocks_checks_and_existing_review(self):
         for key in ("filter.evil.smudge", "merge.evil.driver", "include.path", "url.file:///tmp/.insteadof", "core.sshcommand"):
             with self.subTest(key=key):
                 self.config = key.encode() + b"\nmalicious command\0"
-                self.review()
+                self.assertNotEqual(app.inspect_update_target(self.item)["state"], "ready")
                 self.assertEqual(self.launch()["state"], "blocked")
                 self.assertFalse(self.commands)
 

@@ -605,7 +605,12 @@ def _work(backend, store, root, job):
             receipt = _record(root, receipt, "updating", "Updating Outfit through the native plugin updater.")
             failed = False
             try:
-                _command([str(bindir / "omarchy"), "plugin", "update", APP_ID, "--yes"], environment, 90)
+                backend.update_reviewed_plugin(
+                    {"id": APP_ID, "enabled": binding["enabled"], "barSection": binding["barSection"],
+                     "barSectionKnown": True},
+                    {**binding, "installedRevision": receipt["expectedInstalledRevision"]},
+                    receipt["expectedRevision"], binding["expectedVersion"],
+                )
             except (OSError, ValueError, TimeoutError, subprocess.TimeoutExpired):
                 failed = True
             observed, local = _observed(backend)

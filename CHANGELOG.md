@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2 — 2026-09-20
+
+- Extend pre-execution commit pinning to individual/batch updates and the detached
+  Outfit self-update worker. Both use the same verified snapshot helper as installs.
+- Bind the native updater's fetch to that snapshot with a process-only Git mapping
+  and local-only transport. Preserve the installed public origin and configuration.
+- Verify manifest version, fast-forward ancestry and current installed state before
+  native mutation; preserve native validation, rollback and final outcome checks.
+- Reject executable Git configuration before status inspection and block unsupported
+  replacement objects, partial clones, alternates and shared worktrees.
+- Add real-Git races where upstream HEAD moves immediately before native fetch,
+  including packaged Omarchy updater tests for ordinary and self-update identities.
+
+Evidence and test boundaries: [pinned-update results](tests/PINNED_UPDATE_RESULTS.md).
+
 ## 0.3.1 — 2026-09-20
 
 - Bind marketplace installs to the catalog's exact full commit SHA. Fetch and
