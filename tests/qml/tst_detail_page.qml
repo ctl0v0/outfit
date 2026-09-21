@@ -250,12 +250,13 @@ TestCase {
         var statusPoint = state.mapToItem(surface, 0, 0)
         var primaryPoint = primary.mapToItem(surface, 0, 0)
         compare(primaryPoint.x, statusPoint.x, "Status belongs to the action column")
-        fuzzyCompare(primaryPoint.y - statusPoint.y - state.height, Style.space(8), 1)
+        var actionGap = Style.space(surface.shortWindow ? 6 : 8)
+        fuzzyCompare(primaryPoint.y - statusPoint.y - state.height, actionGap, 1)
         if (batch.visible) {
           var batchPoint = batch.mapToItem(surface, 0, 0)
           compare(batchPoint.x, primaryPoint.x)
           compare(batch.width, primary.width)
-          fuzzyCompare(batchPoint.y - primaryPoint.y - primary.height, Style.space(8), 1)
+          fuzzyCompare(batchPoint.y - primaryPoint.y - primary.height, actionGap, 1)
         }
         var toggle = child(driver, surface.installOptions ? "detailInstallEnabled" : "detailEnabled")
         var placement = child(driver, "detailPlacement")

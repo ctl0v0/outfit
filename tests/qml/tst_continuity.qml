@@ -174,7 +174,7 @@ TestCase {
   }
   function test_progress_before_final_is_bounded_validated_and_never_finishes_mutation() {
     var object = service()
-    verify(object.startPluginAction("install-plugin", "example.widget", {}, "", false, false, ""))
+    verify(object.startPluginAction("install-plugin", "example.widget", {}, "", false, false, "a".repeat(40)))
     tryCompare(object, "mutationActive", true)
     verify(object.activeMutation.streamProgress)
     var event = {responseKind:"progress",action:object.activeMutation.action,
@@ -197,7 +197,7 @@ TestCase {
     for (var i = 0; i < 150; i++) object.receiveMutationOutput(JSON.stringify(event))
     compare(object.mutationProgressEvents, 128)
     var result = {ok:true,action:object.activeMutation.action,generation:object.activeMutation.generation,
-      inventoryAuthoritative:true,inventory:[{id:"example.widget",enabled:false}],installed:["example.widget"],
+      inventoryAuthoritative:true,inventory:[{id:"example.widget",enabled:false,installedRevision:"a".repeat(40)}],installed:["example.widget"],
       unavailable:[],operation:{observed:true,status:"completed",message:"Installed"},notice:"Ordinary success"}
     object.receiveMutationOutput(JSON.stringify(result))
     verify(object.mutationStreamFinished)

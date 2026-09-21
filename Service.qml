@@ -2370,6 +2370,7 @@ Item {
 
   function desiredPluginStateObserved(pluginId) {
     var operation = root.pluginOperation(pluginId)
+    if (operation.action === "install-plugin" && !operation.desiredRevision) return false
     if (operation.desiredRevision && (!root.inventoryEntry(pluginId)
         || root.inventoryEntry(pluginId).installedRevision !== operation.desiredRevision)) return false
     if (typeof operation.desiredInstalled === "boolean"
@@ -2464,6 +2465,9 @@ Item {
       var sectionMatches = !previous.barSection || (local && local.barSectionKnown !== false
         && local.barSection === previous.barSection)
       var action = operation.lastAction
+      if ((action === "install-plugin" || previous.reviewedRevision)
+          && (!/^[0-9a-f]{40}$/.test(String(previous.reviewedRevision || ""))
+            || !local || local.installedRevision !== previous.reviewedRevision)) continue
       if (!previous.batchItem && ((!local && ["enable-plugin", "disable-plugin", "place-plugin"].indexOf(action) >= 0)
           || (action === "place-plugin" && local && !enabled))) {
         root.clearPluginIntent(identity, "superseded", local
@@ -2785,6 +2789,8 @@ Item {
         desiredEnabled:values.wasEnabled, desiredSection:values.barSection})
       root.invalidateUpdate(identity)
     }
+    if (values.reviewedRevision)
+      root.setPluginOperation(identity, {desiredRevision:values.reviewedRevision})
     if (batchItem === true)
       root.setPluginOperation(identity, { batchIndex: root.batchCurrentIndex })
     var started = root.requestMutation(action, values)
@@ -2819,15 +2825,22 @@ Item {
       return root.checkUpdates(true)
     }
     if (!local || !action) return root.verifyMutationState()
+    if (previous.reviewedRevision && local.installedRevision !== previous.reviewedRevision) return false
     if (action === "install-plugin") {
+      if (!previous.reviewedRevision || local.installedRevision !== previous.reviewedRevision) {
+        root.error = "The installed revision does not match the reviewed installation. Review it again before enabling."
+        return false
+      }
       var wantedEnabled = previous.enableAfter === true || Boolean(previous.barSection)
       if (wantedEnabled && !local.enabled)
-        return root.enablePlugin(row, previous.barSection || "", resumeState)
+        return root.startPluginAction("enable-plugin", row.id, resumeState, previous.barSection || "", true, false, previous.reviewedRevision)
       if (!wantedEnabled && local.enabled)
         return root.disablePlugin(row, resumeState)
       if (previous.barSection && local.enabled && local.barSection !== previous.barSection)
-        return root.placePlugin(row, previous.barSection, resumeState)
+        return root.startPluginAction("place-plugin", row.id, resumeState, previous.barSection, true, false, previous.reviewedRevision)
     } else if (action === "enable-plugin") {
+      if (previous.reviewedRevision)
+        return root.startPluginAction("enable-plugin", row.id, resumeState, previous.barSection || "", true, false, previous.reviewedRevision)
       if (!local.enabled) return root.enablePlugin(row, previous.barSection || "", resumeState)
       if (previous.barSection && local.barSection !== previous.barSection)
         return root.placePlugin(row, previous.barSection, resumeState)
@@ -2835,7 +2848,9 @@ Item {
     else if (action === "disable-plugin" && local.enabled)
       return root.disablePlugin(row, resumeState)
     else if (action === "place-plugin" && local.enabled && previous.barSection)
-      return root.placePlugin(row, previous.barSection, resumeState)
+      return previous.reviewedRevision
+        ? root.startPluginAction("place-plugin", row.id, resumeState, previous.barSection, true, false, previous.reviewedRevision)
+        : root.placePlugin(row, previous.barSection, resumeState)
     // Installation and removal retries require a fresh inspector confirmation.
     return root.verifyMutationState()
   }
@@ -2930,6 +2945,13 @@ Item {
         root.batchCurrentIndex = -1
         root.scheduleBatchAdvance(1000)
       }
+      return
+    }
+    if (local && (!item.reviewedRevision || local.installedRevision !== item.reviewedRevision)) {
+      root.replaceBatchItem(index, {status:"failed", message:"Installed revision differs from the reviewed installation. Review it again."})
+      root.batchCurrentIndex = -1
+      root.endBatchLifecycle()
+      root.scheduleBatchAdvance(1000)
       return
     }
     var placementSatisfied = item.barWidget !== true || item.activate !== true

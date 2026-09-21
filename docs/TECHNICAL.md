@@ -1,6 +1,6 @@
 # Outfit technical guide
 
-This describes the **0.3.0** build, whose plugin ID is
+This describes the **0.3.1** build, whose plugin ID is
 `io.github.ctl0v0.outfit`. Start with the [README](../README.md) or
 [user guide](USER_GUIDE.md) for everyday use. The version in the manifest does not
 imply that a Git tag, public source update, or search-pack release already exists.
@@ -355,8 +355,25 @@ Early-build data/registration migration is explicit, documented in
 ## Native operations and security boundaries
 
 Before a management action, the helper validates the ID and rechecks authoritative
-inventory or the validated cached listing. Install invokes
-`omarchy plugin add <validated-github-repo>.git --yes`; bar placement uses
+inventory or the validated cached listing. Marketplace installation requires the
+confirmed full 40-character SHA to match that listing's `listingCommit`. Outfit
+fetches that exact commit into an owner-only `/tmp/outfit-reviewed-*` directory,
+outside plugin discovery, with an empty Git template and isolated Git settings.
+Inherited credentials/configuration, checkout hooks, external filters, automatic
+submodules, URL rewrites and redirects are disabled. Fetching never falls back to HEAD.
+
+The fetched commit object, checked-out HEAD, clean worktree, and manifest identity
+are verified before native validation. The stage is verified again before handing
+it to `omarchy plugin add <private-verified-repository> --yes`. That command's Git
+children permit only local file transport and retain hook/configuration isolation;
+they cannot fetch a newer public HEAD. Omarchy owns installation and discovery.
+Outfit verifies the resulting checkout and staging origin, restores the canonical
+GitHub origin for future updates, and only then requests activation. A native IPC
+timeout can leave a verified installation needing inventory reconciliation;
+an existing target is never overwritten. Temporary staging is removed on ordinary
+success/failure, and the installed Git objects do not depend on it.
+
+Bar placement uses
 `omarchy plugin enable <id> <left|center|right>`. Enable/disable use native commands,
 and confirmed third-party removal uses `omarchy plugin remove <id> --yes`.
 Outfit cannot toggle/remove itself, but can move its widget. First-party plugins
@@ -364,10 +381,13 @@ cannot be removed here and expose disable only when supported; active bar
 replacements have no off toggle.
 
 Batches advance on authoritative inventory, preserve each outcome, and report
-marketplace-reviewed and installed revisions separately. Native installation
-uses the repository's current revision, which can differ from the reviewed one.
+marketplace-reviewed and installed revisions separately. Install reconciliation
+requires them to match; installation retries retain the original SHA. A retry that
+only needs activation rechecks the checkout and canonical origin in the backend.
 Installed is distinct from successfully loaded, enabled, or restart-required.
 Removing another plugin does not necessarily remove its separate data.
+
+Adversarial Git and native-CLI test scope: [pinned-install evidence](../tests/PINNED_INSTALL_RESULTS.md).
 
 Probes use fixed argument arrays, short deadlines, bounded output, a restricted
 environment, and process-group cleanup. HTTP requests require approved HTTPS

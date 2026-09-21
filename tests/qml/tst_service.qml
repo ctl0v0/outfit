@@ -278,13 +278,49 @@ TestCase {
     var object = service()
     respond(object, {})
     object.inventoryReady = true
-    object.inventory = [{id:"example.widget",enabled:false,canDisable:true,kinds:["bar-widget"]}]
+    object.inventory = [{id:"example.widget",enabled:false,canDisable:true,kinds:["bar-widget"],installedRevision:"a".repeat(40)}]
     object.setPluginOperation("example.widget", {pending:false,status:"partial",lastAction:"install-plugin",
-      lastRequest:{enableAfter:true,barSection:"left"}})
+      lastRequest:{enableAfter:true,barSection:"left",reviewedRevision:"a".repeat(40)}})
     verify(object.retryPluginOperation({id:"example.widget",barWidget:true}, {}))
     tryCompare(object, "mutationActive", true)
     compare(object.activeMutation.action, "enable-plugin")
     compare(object.activeMutation.barSection, "left")
+    compare(object.activeMutation.reviewedRevision, "a".repeat(40))
+  }
+  function test_install_recovery_never_accepts_or_activates_a_different_revision() {
+    var object = service()
+    respond(object, {})
+    object.inventoryReady = true
+    object.inventory = [{id:"example.widget",enabled:true,installedRevision:"b".repeat(40)}]
+    object.installed = ["example.widget"]
+    object.setPluginOperation("example.widget", {pending:false,status:"failed",lastAction:"install-plugin",
+      lastRequest:{enableAfter:true,reviewedRevision:"a".repeat(40)}})
+    object.reconcileTerminalOutcomes()
+    compare(object.pluginOperation("example.widget").status, "failed")
+    verify(!object.retryPluginOperation({id:"example.widget"}, {}))
+    verify(!object.mutationActive)
+    object.beginPluginOperation("install-plugin", "example.widget", "", true)
+    object.setPluginOperation("example.widget", {desiredRevision:"a".repeat(40)})
+    verify(!object.desiredPluginStateObserved("example.widget"))
+    object.inventory = [{id:"example.widget",enabled:true,installedRevision:"a".repeat(40)}]
+    verify(object.desiredPluginStateObserved("example.widget"))
+  }
+  function test_batch_retry_retains_revision_and_refuses_mismatched_installation() {
+    var object = service()
+    respond(object, {})
+    object.inventoryReady = true
+    object.inventory = [{id:"example.widget",enabled:false,installedRevision:"b".repeat(40)}]
+    object.batchItems = [{id:"example.widget",status:"queued",activate:true,reviewedRevision:"a".repeat(40)}]
+    object.batchRunning = true
+    object.dispatchNextBatchItem()
+    compare(object.batchItems[0].status, "failed")
+    verify(!object.mutationActive)
+    object.inventory = [{id:"example.widget",enabled:false,installedRevision:"a".repeat(40)}]
+    object.batchItems = [{id:"example.widget",status:"queued",activate:true,reviewedRevision:"a".repeat(40)}]
+    object.dispatchNextBatchItem()
+    tryCompare(object, "mutationActive", true)
+    compare(object.activeMutation.action, "enable-plugin")
+    compare(object.activeMutation.reviewedRevision, "a".repeat(40))
   }
   function test_diagnostics_does_not_replace_browse_or_inventory() {
     var object = service()
@@ -326,9 +362,9 @@ TestCase {
     var object = service()
     respond(object, {})
     object.inventoryReady = true
-    object.inventory = [{id:"example.bar",enabled:false,canDisable:false,kinds:["bar"]}]
+    object.inventory = [{id:"example.bar",enabled:false,canDisable:false,kinds:["bar"],installedRevision:"a".repeat(40)}]
     object.setPluginOperation("example.bar", {pending:false,status:"partial",lastAction:"install-plugin",
-      lastRequest:{enableAfter:true}})
+      lastRequest:{enableAfter:true,reviewedRevision:"a".repeat(40)}})
     verify(object.retryPluginOperation({id:"example.bar",kinds:["bar"]}, {}))
     tryCompare(object, "mutationActive", true)
     compare(object.activeMutation.action, "enable-plugin")
@@ -382,9 +418,9 @@ TestCase {
     respond(object, {})
     object.hasAnalyzed = true
     object.inventoryReady = true
-    object.inventory = [{id:"example.widget",enabled:true,canDisable:true,kinds:["bar-widget"]}]
+    object.inventory = [{id:"example.widget",enabled:true,canDisable:true,kinds:["bar-widget"],installedRevision:"a".repeat(40)}]
     object.setPluginOperation("example.widget", {pending:false,status:"failed",lastAction:"install-plugin",
-      lastRequest:{enableAfter:false,barSection:""}})
+      lastRequest:{enableAfter:false,barSection:"",reviewedRevision:"a".repeat(40)}})
     object.reconcileTerminalOutcomes()
     compare(object.pluginOperation("example.widget").status, "failed")
     verify(object.retryPluginOperation({id:"example.widget",barWidget:true}, {}))

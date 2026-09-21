@@ -62,8 +62,12 @@ You need **Omarchy 4.0.4 with Quattro** and Python 3.12 or newer. A normal stock
 installation is sufficient. Internet access is needed for updates and downloads;
 video playback support is optional.
 
-Outfit **0.3.0** is an early testing release. The bundled catalog lets you start
+Outfit **0.3.1** is an early testing release. The bundled catalog lets you start
 browsing while the searchable documentation library downloads in the background.
+
+Marketplace installs through Outfit use the catalog's exact reviewed commit.
+If that commit cannot be fetched and verified, installation stops without falling
+back to the repository's latest code.
 
 ```bash
 omarchy plugin add https://github.com/ctl0v0/outfit.git --enable

@@ -323,7 +323,7 @@ TestCase {
     view.close()
   }
   function test_pending_recovery_and_batch_ownership_use_real_service_state() {
-    var view = make(entry({enabled:false}))
+    var view = make(entry({enabled:false,installedRevision:"a".repeat(40)}))
     inspect(view)
     view.service.setPluginOperation("example.live", {pending:true,status:"checking",action:"enable-plugin",message:"Checking native state"})
     settle(view)
@@ -331,7 +331,7 @@ TestCase {
     verify(!child(view, "detailPrimary").visible || !child(view, "detailPrimary").enabled)
     compare(page(view).statusMessage, "Checking native state")
     view.service.setPluginOperation("example.live", {pending:false,status:"partial",error:"Enable failed",lastAction:"install-plugin",
-      lastRequest:{action:"install-plugin",enableAfter:true,barSection:"left"}})
+      lastRequest:{action:"install-plugin",enableAfter:true,barSection:"left",reviewedRevision:"a".repeat(40)}})
     settle(view)
     compare(page(view).presentation.primaryAction, "retry")
     compare(page(view).statusMessage, "Enable failed")

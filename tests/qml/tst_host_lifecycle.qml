@@ -22,8 +22,8 @@ TestCase {
       preferences:{watchHardware:false,readmeIndexing:false,readmeEnrichment:false,services:[]}}))
     object.inventoryReady = true
     object.shell = createTemporaryObject(shellComponent, testCase)
-    object.setupSelection = {"example.alpha":{id:"example.alpha",name:"Alpha",activate:true},
-      "example.beta":{id:"example.beta",name:"Beta",activate:true}}
+    object.setupSelection = {"example.alpha":{id:"example.alpha",name:"Alpha",activate:true,reviewedRevision:"a".repeat(40)},
+      "example.beta":{id:"example.beta",name:"Beta",activate:true,reviewedRevision:"a".repeat(40)}}
     return object
   }
   function jobs(object) { return findChild(object, "hostLifecycleJobs") }
@@ -60,7 +60,7 @@ TestCase {
   function completeMutation(object, success) {
     var request = object.activeMutation
     var inventory = object.inventory.slice()
-    if (success) inventory.push({id:request.pluginId,enabled:true})
+    if (success) inventory.push({id:request.pluginId,enabled:true,installedRevision:request.reviewedRevision})
     object.receiveMutationOutput(JSON.stringify({ok:success, action:request.action,generation:request.generation,
       inventoryAuthoritative:success,inventory:inventory,installed:inventory.map(function(item) { return item.id }),
       unavailable:[],operation:{observed:success,status:success ? "completed" : "failed"},
@@ -418,7 +418,7 @@ TestCase {
     endAndPoll(object)
     finish(object, snapshot())
     verify(object.hostRuntimeReady)
-    verify(object.startPluginAction("install-plugin", "example.individual", {}, "", true, false, ""))
+    verify(object.startPluginAction("install-plugin", "example.individual", {}, "", true, false, "a".repeat(40)))
     tryCompare(object, "mutationActive", true)
     verify(!object.hostRuntimeReady)
     completeMutation(object, true)

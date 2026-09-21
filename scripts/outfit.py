@@ -27,6 +27,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -2169,6 +2170,12 @@ def command_launch(argv: list[str]) -> tuple[list[str], dict[str, str]]:
 
 def run_command(argv: list[str], timeout: float, maximum: int) -> bytes:
     effective, environment = command_launch(argv)
+    return run_bounded_process(effective, environment, timeout, maximum)
+
+
+def run_bounded_process(effective: list[str], environment: dict[str, str],
+                        timeout: float, maximum: int, cwd: str | None = None) -> bytes:
+    """Internal launch boundary; callers supply fixed commands and sanitized environments."""
     process = subprocess.Popen(
         effective,
         stdin=subprocess.DEVNULL,
@@ -2176,6 +2183,7 @@ def run_command(argv: list[str], timeout: float, maximum: int) -> bytes:
         stderr=subprocess.DEVNULL,
         env=environment,
         start_new_session=True,
+        cwd=cwd,
     )
     _children.add(process)
     chunks: list[bytes] = []
@@ -2217,6 +2225,124 @@ def run_command(argv: list[str], timeout: float, maximum: int) -> bytes:
                     process.stdout.close()
             finally:
                 _children.discard(process)
+
+
+def install_git_environment(home: Path, protocol: str) -> dict[str, str]:
+    """No caller config, templates, hooks, filters, helpers or ambient credentials.
+
+    HTTPS is used only to fetch the catalog commit. The native handoff permits
+    only file transport, so it cannot silently refetch the moving remote HEAD.
+    """
+    environment = {"PATH": SYSTEM_COMMAND_PATH, "HOME": str(home), "XDG_CONFIG_HOME": str(home),
+                   "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
+                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
+                   "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false",
+                   "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
+    settings = {"credential.helper": "", "core.askPass": "/bin/false",
+                "core.hooksPath": "/dev/null", "core.fsmonitor": "false",
+                "core.attributesFile": "/dev/null", "core.autocrlf": "false",
+                "init.templateDir": "", "protocol.allow": "never",
+                "protocol." + protocol + ".allow": "always", "http.followRedirects": "false",
+                "http.sslVerify": "true", "http.extraHeader": "", "http.cookieFile": "",
+                "http.saveCookies": "false", "fetch.recurseSubmodules": "false",
+                "submodule.recurse": "false", "maintenance.auto": "false", "gc.auto": "0"}
+    environment["GIT_CONFIG_COUNT"] = str(len(settings))
+    for index, (key, value) in enumerate(settings.items()):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    return environment
+
+
+def install_git(path: Path, arguments: list[str], timeout: float = 5,
+                maximum: int = 128 * 1024) -> bytes:
+    return run_bounded_process([COMMANDS["git"], "-C", str(path), *arguments],
+                               install_git_environment(path, "https"), timeout, maximum, cwd=str(path))
+
+
+def verify_install_checkout(path: Path, identity: str, revision: str) -> None:
+    if (path.is_symlink() or path.resolve() != path.absolute() or not path.is_dir()
+            or (path / ".git").is_symlink() or not (path / ".git").is_dir()):
+        raise ValueError("The reviewed installation is not an ordinary Git checkout.")
+    if install_git(path, ["rev-parse", "--show-toplevel"]).decode().strip() != str(path):
+        raise ValueError("The reviewed installation's Git worktree is not confirmed.")
+    actual = install_git(path, ["rev-parse", "--verify", "HEAD^{commit}"], maximum=256).decode("ascii").strip()
+    if actual != revision:
+        raise ValueError("The installed checkout does not match the reviewed catalog commit.")
+    if install_git(path, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]):
+        raise ValueError("The reviewed installation has unexpected local changes.")
+    descriptor = os.open(path / "manifest.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_UPDATE_MANIFEST_BYTES:
+            raise ValueError("The reviewed plugin manifest is unavailable.")
+        update_manifest(stream.read(MAX_UPDATE_MANIFEST_BYTES + 1), identity)
+
+
+def verify_reviewed_install(identity: str, revision: str, repository: str) -> None:
+    target = plugin_install_path(identity)
+    if target != Path.home() / ".config/omarchy/plugins" / identity:
+        raise ValueError("The native installer does not support this plugin configuration directory.")
+    verify_install_checkout(target, identity, revision)
+    origin = install_git(target, ["config", "--get-all", "remote.origin.url"]).decode().strip()
+    if origin != repository + ".git":
+        raise ValueError("The reviewed installation's upstream origin is not confirmed.")
+
+
+def install_reviewed_plugin(item: dict[str, Any], revision: str) -> bytes:
+    """Install only a checked-out, verified catalog commit through native Omarchy.
+
+    Staging is private and outside plugin discovery. Nothing from the remote is
+    executed here. In particular, never install HEAD and reset it afterwards.
+    """
+    identity, repository = item.get("id"), item.get("repo")
+    parsed = github_repo(repository)
+    if (not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision)
+            or revision != item.get("listingCommit") or not parsed or parsed[2] != repository
+            or any(part in {".", ".."} for part in parsed[:2])
+            or not identity or plugin_id(identity) != identity):
+        raise ValueError("Installation requires the exact reviewed catalog source and full commit SHA.")
+    target = plugin_install_path(identity)
+    if (target != Path.home() / ".config/omarchy/plugins" / identity
+            or target.parent.resolve() != target.parent.absolute()):
+        raise ValueError("The native installer does not support this plugin configuration directory.")
+    if os.path.lexists(target):
+        raise ValueError("The selected plugin is already installed.")
+    # Ignore TMPDIR: a caller-controlled location might itself be watched by the shell.
+    with tempfile.TemporaryDirectory(prefix="outfit-reviewed-", dir="/tmp") as directory:
+        stage = Path(directory)
+        install_git(stage, ["init", "--template=", "-b", "outfit-reviewed"])
+        install_git(stage, ["fetch", "--no-tags", "--no-recurse-submodules", "--",
+                            repository + ".git", revision], timeout=45)
+        fetched = install_git(stage, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"], maximum=256).decode("ascii").strip()
+        if fetched != revision:
+            raise ValueError("The fetched commit does not match the reviewed catalog commit.")
+        install_git(stage, ["checkout", "--detach", revision])
+        verify_install_checkout(stage, identity, revision)
+        run_command([COMMANDS["omarchy"], "plugin", "validate", str(stage)], 15, 32 * 1024)
+        verify_install_checkout(stage, identity, revision)
+        # Keep Git hardening in the environment for the native installer's children.
+        # Only our generated absolute path is handed off; request URLs/paths never are.
+        argv, environment = command_launch([COMMANDS["omarchy"], "plugin", "add", str(stage), "--yes"])
+        safe_git = install_git_environment(stage, "file")
+        environment.update({key: value for key, value in safe_git.items()
+                            if key.startswith("GIT_") or key == "SSH_ASKPASS"})
+        output = b""
+        native_error = None
+        try:
+            output = run_bounded_process(argv, environment, 60, 128 * 1024, cwd=str(stage))
+        except (OSError, TimeoutError, ValueError) as error:
+            native_error = error
+        # Native IPC may time out after the clone has committed. Finalize only an
+        # exact, clean result whose origin is still our private staging repository.
+        verify_install_checkout(target, identity, revision)
+        origin = install_git(target, ["config", "--get-all", "remote.origin.url"]).decode().strip()
+        if origin != str(stage):
+            raise ValueError("The native installation source could not be confirmed.")
+        install_git(target, ["remote", "set-url", "origin", repository + ".git"])
+        verify_reviewed_install(identity, revision, repository)
+        if native_error is not None:
+            raise ValueError("The reviewed commit was installed, but native completion needs verification.") from native_error
+        return output
 
 
 def run_activation_command(argv: list[str], observed: dict[str, Any] | None = None) -> bytes:
@@ -6514,6 +6640,8 @@ def mutation_observed(
         return target is None
     if target is None:
         return False
+    if request.get("reviewedRevision") and target.get("installedRevision") != full_sha(request["reviewedRevision"]):
+        return False
     if action == "update-plugin":
         expected = full_sha(request.get("expectedRevision"))
         version = request.get("expectedVersion")
@@ -6534,6 +6662,8 @@ def mutation_observed(
             and target.get("barSection") == one_line(request.get("barSection"), 12)
         )
     if action == "install-plugin":
+        if not full_sha(request.get("reviewedRevision")):
+            return False
         section = one_line(request.get("barSection"), 12)
         if section in {"left", "center", "right"}:
             return (
@@ -6726,6 +6856,14 @@ def run(
         target = next((item for item in authoritative_inventory if item["id"] == target_id), None)
         if target is None:
             raise ValueError("The selected plugin is no longer installed.")
+        if "reviewedRevision" in request and action in {"enable-plugin", "place-plugin"}:
+            # Retried installation activation retains its original authorization.
+            catalog, _fetched, _generated = load_catalog(store)
+            listed = next((item for item in catalog if item["id"] == target_id), None)
+            reviewed = full_sha(request.get("reviewedRevision"))
+            if not listed or not reviewed or reviewed != listed.get("listingCommit"):
+                raise ValueError("The marketplace listing changed; review the selected plugin again.")
+            verify_reviewed_install(target_id, reviewed, listed["repo"])
         if action == "enable-plugin":
             is_bar_replacement = "bar" in target.get("kinds", [])
             if not target["canDisable"] and not is_bar_replacement:
@@ -6897,12 +7035,10 @@ def run(
             raise ValueError("The selected plugin is already installed.")
         try:
             phase("installing")
-            output = run_command(
-                [COMMANDS["omarchy"], "plugin", "add", target["repo"] + ".git", "--yes"],
-                60, 128 * 1024,
-            )
+            output = install_reviewed_plugin(target, reviewed_revision)
         except (OSError, TimeoutError, ValueError) as command_error:
-            raise ValueError("Omarchy could not install the selected plugin.") from command_error
+            raise ValueError("Could not complete installation of the exact reviewed commit. "
+                             "No fallback to the repository's latest version was attempted.") from command_error
         error = ""
         section = one_line(request.get("barSection"), 12)
         enable_after = request.get("enableAfter") is True

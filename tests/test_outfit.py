@@ -1484,6 +1484,7 @@ omarchy plugin add https://github.com/example/dock-helper
         installed = OUTFIT.validate_inventory([{
             "id": "example.dock-helper",
             "name": "Dock Helper",
+            "installedRevision": "a" * 40,
             "enabled": False,
             "canDisable": True,
             "firstParty": False,
@@ -1494,7 +1495,7 @@ omarchy plugin add https://github.com/example/dock-helper
                 OUTFIT.save_catalog(store, items, generated, 1234.5)
                 with (
                     mock.patch.object(OUTFIT, "scan_inventory", side_effect=[([], False), (installed, False)]),
-                    mock.patch.object(OUTFIT, "run_command", return_value=b"Added example.dock-helper") as command,
+                    mock.patch.object(OUTFIT, "install_reviewed_plugin", return_value=b"Added example.dock-helper") as command,
                     mock.patch.object(OUTFIT, "fetch_catalog") as fetch_catalog,
                     mock.patch.object(OUTFIT, "enrich_readmes") as enrich_readmes,
                 ):
@@ -1507,11 +1508,9 @@ omarchy plugin add https://github.com/example/dock-helper
             finally:
                 store.close()
 
-        command.assert_called_once_with(
-            [OUTFIT.COMMANDS["omarchy"], "plugin", "add",
-             "https://github.com/example/dock-helper.git", "--yes"],
-            60, 128 * 1024,
-        )
+        self.assertEqual(command.call_args.args[0]["repo"], "https://github.com/example/dock-helper")
+        self.assertEqual(command.call_args.args[1], "a" * 40)
+        self.assertEqual(command.call_count, 1)
         fetch_catalog.assert_not_called()
         enrich_readmes.assert_not_called()
         local = next(row for row in result["inventory"] if row["id"] == "example.dock-helper")
@@ -1525,6 +1524,7 @@ omarchy plugin add https://github.com/example/dock-helper
         installed = OUTFIT.validate_inventory([{
             "id": "example.dock-helper",
             "name": "Dock Helper",
+            "installedRevision": "a" * 40,
             "kinds": ["bar-widget"],
             "enabled": True,
             "canDisable": True,
@@ -1540,9 +1540,8 @@ omarchy plugin add https://github.com/example/dock-helper
                         OUTFIT, "scan_inventory", side_effect=[([], False),
                             ([dict(installed[0], enabled=False, barSection="")], False), (installed, False)]
                     ),
-                    mock.patch.object(
-                        OUTFIT, "run_command", side_effect=[b"Added example.dock-helper", b"Enabled example.dock-helper"]
-                    ) as command,
+                    mock.patch.object(OUTFIT, "install_reviewed_plugin", return_value=b"Added example.dock-helper"),
+                    mock.patch.object(OUTFIT, "run_command", return_value=b"Enabled example.dock-helper") as command,
                 ):
                     result = OUTFIT.run({
                         "action": "install-plugin",
@@ -1555,11 +1554,6 @@ omarchy plugin add https://github.com/example/dock-helper
                 store.close()
 
         self.assertEqual(command.call_args_list, [
-            mock.call(
-                [OUTFIT.COMMANDS["omarchy"], "plugin", "add",
-                 "https://github.com/example/dock-helper.git", "--yes"],
-                60, 128 * 1024,
-            ),
             mock.call(
                 [OUTFIT.COMMANDS["omarchy"], "plugin", "enable", "example.dock-helper", "center"],
                 35, 32 * 1024,
@@ -1576,6 +1570,7 @@ omarchy plugin add https://github.com/example/dock-helper
         installed = OUTFIT.validate_inventory([{
             "id": "example.quiet-hours",
             "name": "Quiet Hours",
+            "installedRevision": "c" * 40,
             "kinds": ["service"],
             "enabled": True,
             "canDisable": True,
@@ -1590,10 +1585,9 @@ omarchy plugin add https://github.com/example/dock-helper
                         OUTFIT, "scan_inventory", side_effect=[([], False),
                             ([dict(installed[0], enabled=False)], False), (installed, False)]
                     ),
-                    mock.patch.object(
-                        OUTFIT, "run_command", side_effect=[b"Added example.quiet-hours", b"Enabled example.quiet-hours"]
-                    ) as command,
-                    mock.patch.object(OUTFIT, "installed_revision", return_value="d" * 40),
+                    mock.patch.object(OUTFIT, "install_reviewed_plugin", return_value=b"Added example.quiet-hours"),
+                    mock.patch.object(OUTFIT, "run_command", return_value=b"Enabled example.quiet-hours") as command,
+                    mock.patch.object(OUTFIT, "installed_revision", return_value="c" * 40),
                 ):
                     result = OUTFIT.run({
                         "action": "install-plugin",
@@ -1607,17 +1601,12 @@ omarchy plugin add https://github.com/example/dock-helper
 
         self.assertEqual(command.call_args_list, [
             mock.call(
-                [OUTFIT.COMMANDS["omarchy"], "plugin", "add",
-                 "https://github.com/example/quiet-hours.git", "--yes"],
-                60, 128 * 1024,
-            ),
-            mock.call(
                 [OUTFIT.COMMANDS["omarchy"], "plugin", "enable", "example.quiet-hours"],
                 35, 32 * 1024,
             ),
         ])
         self.assertEqual(result["operation"]["status"], "completed")
-        self.assertEqual(result["operation"]["installedRevision"], "d" * 40)
+        self.assertEqual(result["operation"]["installedRevision"], "c" * 40)
         self.assertEqual(result["operation"]["reviewedRevision"], "c" * 40)
         self.assertEqual(result["notice"], "Plugin installed and enabled.")
 
@@ -1660,12 +1649,12 @@ omarchy plugin add https://github.com/example/dock-helper
                     mock.patch.object(
                         OUTFIT, "run_command",
                         side_effect=[
-                            b"Added example.quiet-hours",
                             ValueError("enable failed"),
                             ValueError("enable failed"),
                             ValueError("enable failed"),
                         ],
                     ),
+                    mock.patch.object(OUTFIT, "install_reviewed_plugin", return_value=b"Added example.quiet-hours"),
                     mock.patch.object(OUTFIT.time, "sleep"),
                 ):
                     result = OUTFIT.run({

@@ -198,21 +198,26 @@ class NativeRoutingTests(unittest.TestCase):
         store = app.Store(self.base / "cache")
         self.addCleanup(store.close)
         app.save_catalog(store, items, generated, 100)
-        installed = app.validate_inventory([{"id": items[0]["id"], "enabled": False}])
+        installed = app.validate_inventory([{"id": items[0]["id"], "enabled": False,
+                                             "installedRevision": items[0]["listingCommit"]}])
         with mock.patch.dict(os.environ, self.environment, clear=True), \
                 mock.patch.object(app.subprocess, "Popen", side_effect=self.guarded_popen), \
                 mock.patch.object(app, "scan_inventory", side_effect=[([], False), (installed, False)]), \
                 mock.patch.object(app, "installed_revision", return_value=""), \
+                mock.patch.object(app, "install_reviewed_plugin", side_effect=lambda item, revision:
+                    app.run_command([app.COMMANDS["omarchy"], "plugin", "add", "/private-reviewed-fixture", "--yes"], 60, 128 * 1024)) as install, \
                 mock.patch.object(app, "fetch_bytes", side_effect=AssertionError("No network")), \
                 mock.patch.object(app, "run_command", wraps=app.run_command) as declared:
             result = app.run({"action": "install-plugin", "pluginId": items[0]["id"], "reviewedRevision": items[0]["listingCommit"],
                 "OMARCHY_PATH": str(self.poison), "PATH": str(self.poison), "command": str(self.poison / "omarchy"),
                 "repo": "https://github.com/ignored/override"}, store, now=200)
             self.assertTrue(result["operation"]["observed"])
-            declared.assert_called_once_with([app.COMMANDS["omarchy"], "plugin", "add", items[0]["repo"] + ".git", "--yes"],
-                                             60, 128 * 1024)
+            self.assertEqual(install.call_args.args[0]["repo"], items[0]["repo"])
+            self.assertEqual(install.call_args.args[1], items[0]["listingCommit"])
+            declared.assert_called_once_with([app.COMMANDS["omarchy"], "plugin", "add", "/private-reviewed-fixture", "--yes"],
+                                              60, 128 * 1024)
         self.assertEqual(self.records()[0]["executable"], str(self.bindir / "omarchy"))
-        self.assertEqual(self.records()[1]["args"], [items[0]["repo"] + ".git", "--yes"])
+        self.assertEqual(self.records()[1]["args"], ["/private-reviewed-fixture", "--yes"])
 
     def test_lifecycle_request_uses_configured_native_shell_not_request_metadata(self):
         with mock.patch.dict(os.environ, self.environment, clear=True), \

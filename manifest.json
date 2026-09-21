@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ctl0v0.outfit",
   "name": "Outfit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "ctl0v0",
   "license": "MIT",
   "description": "Discover, preview, and manage Omarchy plugins with setup-aware suggestions and searchable marketplace browsing.",

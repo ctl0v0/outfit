@@ -13,6 +13,14 @@ Listing and device text is rendered as plain text. README formatting uses an
 escaped markup allowlist; repository HTML and inline images are not rendered.
 Optional video is loaded only on explicit playback.
 
+Marketplace installation is bound to the catalog's full `listingCommit`: fetch,
+checkout, identity checks and revision verification precede native installation
+and any plugin execution. The native installer receives a private verified local
+repository with Git hooks and inherited configuration disabled. Missing or
+unavailable commits fail closed, without a moving-HEAD fallback. This boundary
+does not sandbox the reviewed plugin or certify its behavior after activation.
+See [implementation and tests](tests/PINNED_INSTALL_RESULTS.md).
+
 Review `scripts/outfit.py`, `Service.qml`, `BackgroundWorker.qml`,
 `ThumbnailLoader.qml`, and the media components when changing those boundaries.
 New network hosts, subprocesses, write locations or automatic actions require

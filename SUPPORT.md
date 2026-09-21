@@ -3,7 +3,7 @@
 Outfit supports **stock Omarchy 4.0.4 with Quattro** and Python 3.12 or newer.
 Start with the [user guide and FAQ](docs/USER_GUIDE.md) for everyday controls,
 or the [migration guide](IDENTITY_MIGRATION.md) if you are upgrading an early test
-build. These instructions describe the 0.3.0 build.
+build. These instructions describe the 0.3.1 build.
 
 ## Quick recovery
 

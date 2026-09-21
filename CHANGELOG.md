@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1 — 2026-09-20
+
+- Bind marketplace installs to the catalog's exact full commit SHA. Fetch and
+  verify a private checkout before native installation; never install moving HEAD.
+- Disable inherited Git hooks, templates, filters, credentials and URL rewrites
+  during staging and the native local-repository handoff. Preserve the public
+  upstream origin for subsequent updates.
+- Retain reviewed revisions through installation retries, batch activation and
+  inventory reconciliation.
+- Add real-Git regressions with remote HEAD ahead of the reviewed commit, an
+  execution sentinel, failure cases and isolated native add/validate coverage.
+- Align the compact-layout spacing test with the existing short-window layout.
+
+Evidence and boundaries: [pinned-install results](tests/PINNED_INSTALL_RESULTS.md).
+
 ## 0.3.0 — 2026-09-20
 
 ### Plugin updates
