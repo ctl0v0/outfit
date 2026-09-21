@@ -81,6 +81,15 @@ subprocess.run([{sys.executable!r}, "-I", "-B", str(target / "install.py")], che
                             "OMARCHY_PATH": str(self.runtime)}
         self.addCleanup(mock.patch.stopall)
         mock.patch.dict(os.environ, self.environment, clear=True).start()
+        # Git metadata inspection must see this fixture's configuration, not
+        # system-wide Git LFS/custom helpers installed on a hosted CI runner.
+        real_launch = app.command_launch
+        def isolated_launch(argv):
+            effective, environment = real_launch(argv)
+            if argv[0] == app.COMMANDS["git"]:
+                environment["GIT_CONFIG_NOSYSTEM"] = "1"
+            return effective, environment
+        mock.patch.object(app, "command_launch", side_effect=isolated_launch).start()
         mock.patch.object(app, "run_bounded_process", side_effect=self.process).start()
 
     def write_executable(self, name, body):

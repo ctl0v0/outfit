@@ -69,6 +69,13 @@ graphical VM lifecycle run is claimed by this report.
 - No QML implementation changed; existing QML state/lifecycle coverage is run by
   the portable CI job on the published candidate.
 
+The first Ubuntu CI run exposed system Git configuration leaking into disposable
+metadata fixtures (host-wide Git LFS filters make such a source unsupported by the
+production policy). Test launch adapters now explicitly disable system Git config
+for those fixture reads while preserving repository-local adversarial settings.
+The production configuration checks were not weakened. Arch/Qt passed that initial
+run; final CI is linked from the marketplace submission at its final candidate SHA.
+
 The prior [0.3.1 install report](PINNED_INSTALL_RESULTS.md) and older
 [VM update report](vm/PLUGIN_UPDATES_RESULTS.md) describe their own snapshots and
 are not claims that these newer paths were exercised in those earlier sessions.

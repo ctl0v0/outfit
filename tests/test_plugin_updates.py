@@ -27,6 +27,19 @@ class PluginUpdateTests(unittest.TestCase):
         }, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        # Hosted Ubuntu runners configure Git LFS filters system-wide. These
+        # fixtures model ordinary repositories, not that host configuration.
+        # Preserve repo-local (including adversarial) config; do not relax the
+        # production executable-config check to accommodate a test runner.
+        real_launch = app.command_launch
+        def isolated_launch(argv):
+            effective, environment = real_launch(argv)
+            if argv[0] == app.COMMANDS["git"]:
+                environment["GIT_CONFIG_NOSYSTEM"] = "1"
+            return effective, environment
+        launch_patch = mock.patch.object(app, "command_launch", side_effect=isolated_launch)
+        launch_patch.start()
+        self.addCleanup(launch_patch.stop)
         self.root = self.home / ".config/omarchy/plugins"
         self.repo = self.root / self.identity
         self.repo.mkdir(parents=True)
