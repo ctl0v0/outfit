@@ -5,6 +5,7 @@ import QtQuick.Window
 import QtQuick.Controls as C
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import qs.Ui as Ui
 import "Typography.js" as Typography
@@ -297,8 +298,8 @@ Item {
 
   readonly property string pluginId: manifest && manifest.id
     ? String(manifest.id) : "io.github.ctl0v0.outfit"
-  readonly property color foreground: Color.foreground
-  readonly property color background: Color.background
+  readonly property color foreground: Commons.Color.foreground
+  readonly property color background: Commons.Color.background
   readonly property color secondary: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.64)
   readonly property color faint: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.055)
   readonly property string fontFamily: Style.font.family
@@ -340,9 +341,9 @@ Item {
     background: BorderSurface {
       radius: Style.cornerRadius
       color: parent.selected || parent.hovered || parent.activeFocus
-        ? Style.selectedFillFor(parent.foreground, Color.accent) : "transparent"
-      borderSpec: parent.activeFocus ? Border.controlSpec("focus", parent.foreground, Color.accent)
-        : parent.bordered ? Border.controlSpec("normal", parent.foreground, Color.accent) : Border.none()
+        ? Style.selectedFillFor(parent.foreground, Commons.Color.accent) : "transparent"
+      borderSpec: parent.activeFocus ? Border.controlSpec("focus", parent.foreground, Commons.Color.accent)
+        : parent.bordered ? Border.controlSpec("normal", parent.foreground, Commons.Color.accent) : Border.none()
     }
     Keys.onReturnPressed: if (enabled) clicked()
     Keys.onEnterPressed: if (enabled) clicked()
@@ -2109,7 +2110,7 @@ Item {
     height: badgeLabel.implicitHeight + Style.space(compactPadding ? 4 : 8)
     radius: filled ? Style.cornerRadius : height / 2
     color: filled ? root.foreground : emphasized
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.13)
+      ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.13)
       : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.065)
     Accessible.role: Accessible.StaticText
     Accessible.name: label
@@ -2119,7 +2120,7 @@ Item {
       anchors.centerIn: parent
       text: parent.label
       textFormat: Text.PlainText
-      color: parent.filled ? root.background : (parent.emphasized ? Color.accent : root.secondary)
+      color: parent.filled ? root.background : (parent.emphasized ? Commons.Color.accent : root.secondary)
       font.family: root.fontFamily
       font.pixelSize: parent.labelSize
       font.bold: parent.filled || parent.emphasized
@@ -2142,7 +2143,7 @@ Item {
       objectName: "newListingText"
       anchors.centerIn: parent
       text: "New"
-      color: Color.accent
+      color: Commons.Color.accent
       font.family: root.fontFamily
       font.pixelSize: parent.labelSize
       font.bold: true
@@ -2203,9 +2204,9 @@ Item {
     height: Style.space(68)
     radius: Style.cornerRadius
     color: chosen
-      ? Style.selectedFillFor(root.foreground, Color.accent) : root.faint
-    borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent)
-      : (chosen ? Border.controlSpec("selected", root.foreground, Color.accent) : Border.none())
+      ? Style.selectedFillFor(root.foreground, Commons.Color.accent) : root.faint
+    borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Commons.Color.accent)
+      : (chosen ? Border.controlSpec("selected", root.foreground, Commons.Color.accent) : Border.none())
     activeFocusOnTab: true
     Keys.onReturnPressed: root.toggleServiceDraft(serviceOption.id)
     Keys.onEnterPressed: root.toggleServiceDraft(serviceOption.id)
@@ -2235,9 +2236,9 @@ Item {
         height: width
         anchors.verticalCenter: parent.verticalCenter
         radius: Style.space(5)
-        color: serviceChoice.chosen ? Color.accent : "transparent"
+        color: serviceChoice.chosen ? Commons.Color.accent : "transparent"
         border.width: 1
-        border.color: serviceChoice.chosen ? Color.accent : root.secondary
+        border.color: serviceChoice.chosen ? Commons.Color.accent : root.secondary
 
         Text {
           anchors.centerIn: parent
@@ -2359,10 +2360,10 @@ Item {
     height: listRow ? Math.max(Style.space(listLayout.minimumHeight), cardLayout.implicitHeight + Style.space(16))
       : Math.max(Style.space(176), cardLayout.implicitHeight + Style.space(density.padding * 2))
     radius: Style.cornerRadius
-    color: inspected ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.11)
-      : (chosen ? Style.selectedFillFor(root.foreground, Color.accent) : root.faint)
-    borderSpec: inspected || activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent)
-      : (chosen ? Border.controlSpec("selected", root.foreground, Color.accent) : Border.none())
+    color: inspected ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.11)
+      : (chosen ? Style.selectedFillFor(root.foreground, Commons.Color.accent) : root.faint)
+    borderSpec: inspected || activeFocus ? Border.controlSpec("focus", root.foreground, Commons.Color.accent)
+      : (chosen ? Border.controlSpec("selected", root.foreground, Commons.Color.accent) : Border.none())
     activeFocusOnTab: true
     onActiveFocusChanged: if (activeFocus && !discoveryCard && !matchCard) root.rovingResultId = String(pluginRow.id)
     Accessible.description: "Arrow keys move between plugins. Enter opens details. F2 explores metric information with arrows; Enter or Space shows help. Tab returns to filters. F6 focuses the toolbar."
@@ -2525,7 +2526,7 @@ Item {
               objectName: "newListingFallback"
               visible: !setupPluginCard.showThumbnail && root.listingIsNew(setupPluginCard.pluginRow)
               text: "New"
-              color: Color.accent
+              color: Commons.Color.accent
               font.family: root.fontFamily
               font.pixelSize: setupPluginCard.metadataSize
             }
@@ -2637,7 +2638,7 @@ Item {
         height: Math.ceil(headingMetrics.height) * 2 + Style.space(4)
         text: String(setupPluginCard.pluginRow.discoveryHeading || "Something useful to try")
         textFormat: Text.PlainText
-        color: Color.accent
+        color: Commons.Color.accent
         font.family: root.fontFamily
         font.pixelSize: Style.font.subtitle
         font.bold: true
@@ -2736,7 +2737,7 @@ Item {
           objectName: "newListingFallback"
           visible: !setupPluginCard.showThumbnail && root.listingIsNew(setupPluginCard.pluginRow)
           text: "New"
-          color: Color.accent
+          color: Commons.Color.accent
           font.family: root.fontFamily
           font.pixelSize: setupPluginCard.metadataSize
         }
@@ -2926,7 +2927,7 @@ Item {
     background: BorderSurface {
       color: root.background
       radius: Style.cornerRadius
-      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+      borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
     }
   }
 
@@ -2989,7 +2990,7 @@ Item {
     required property string label
     required property string description
     required property string iconKind
-    foreground: Color.popups.text
+    foreground: Commons.Color.popups.text
     focusable: true
     opacity: enabled ? 1 : 0.5
     implicitHeight: maintenanceCopy.implicitHeight + Style.space(20)
@@ -3004,7 +3005,7 @@ Item {
         width: Style.space(20)
         height: width
         kind: maintenanceAction.iconKind
-        tint: Color.popups.text
+        tint: Commons.Color.popups.text
       }
       Column {
         id: maintenanceCopy
@@ -3015,7 +3016,7 @@ Item {
           text: maintenanceAction.label
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          color: Color.popups.text
+          color: Commons.Color.popups.text
           font.family: root.fontFamily
           font.pixelSize: root.readingSize
           font.bold: true
@@ -3025,7 +3026,7 @@ Item {
           text: maintenanceAction.description
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          color: Color.popups.text
+          color: Commons.Color.popups.text
           opacity: 0.7
           font.family: root.fontFamily
           font.pixelSize: root.readingSize
@@ -3134,7 +3135,7 @@ Item {
         width: metricLabel.metricIconSize
         height: width
         kind: metricLabel.metric
-        tint: Color.accent
+        tint: Commons.Color.accent
       }
       Text {
         objectName: "metricCaption"
@@ -3151,7 +3152,7 @@ Item {
         wrapMode: metricLabel.browseSmall ? Text.WrapAnywhere : Text.NoWrap
         text: (metricLabel.browseSmall || metricLabel.iconMetric ? "" : metricLabel.visualLabel + " ") + metricLabel.number
         textFormat: Text.PlainText
-        color: Color.accent
+        color: Commons.Color.accent
         font.family: root.fontFamily
         font.pixelSize: metricLabel.textSize
         font.bold: true
@@ -3173,12 +3174,12 @@ Item {
           width: root.iconSize
           height: width
           kind: metricLabel.metric
-          tint: Color.accent
+          tint: Commons.Color.accent
         }
         Text {
           text: metricLabel.number
           textFormat: Text.PlainText
-          color: Color.accent
+          color: Commons.Color.accent
           font.family: root.fontFamily
           font.pixelSize: root.valueSize
           font.bold: true
@@ -3206,7 +3207,7 @@ Item {
         width: metricLabel.metricIconSize
         height: width
         kind: "info"
-        tint: Color.accent
+        tint: Commons.Color.accent
       }
     }
     MouseArea {
@@ -3323,7 +3324,7 @@ Item {
         height: visible ? Math.min(mediaPreview.maximumStageHeight, width * 9 / 16) : 0
         radius: Style.cornerRadius
         color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-        borderSpec: previewImage.activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent) : Border.none()
+        borderSpec: previewImage.activeFocus ? Border.controlSpec("focus", root.foreground, Commons.Color.accent) : Border.none()
         clip: true
 
         Image {
@@ -3464,7 +3465,7 @@ Item {
             width: parent.width
             text: mediaPreview.displayError
             textFormat: Text.PlainText
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: root.supportingSize
             horizontalAlignment: Text.AlignHCenter
@@ -3517,9 +3518,9 @@ Item {
               height: Style.space(46)
               radius: Style.space(5)
               color: index === mediaPreview.selectedIndex
-                ? Style.selectedFillFor(root.foreground, Color.accent) : root.faint
+                ? Style.selectedFillFor(root.foreground, Commons.Color.accent) : root.faint
               borderSpec: index === mediaPreview.selectedIndex
-                ? Border.controlSpec("selected", root.foreground, Color.accent) : Border.none()
+                ? Border.controlSpec("selected", root.foreground, Commons.Color.accent) : Border.none()
               clip: true
               activeFocusOnTab: true
               Accessible.role: Accessible.Button
@@ -3686,7 +3687,7 @@ Item {
 
     radius: Style.cornerRadius
     color: root.background
-    borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+    borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
 
     MouseArea {
       anchors.fill: parent
@@ -3753,14 +3754,14 @@ Item {
         onAboutToShow: root.dismissTooltips()
         onOpened: uninstallAction.forceActiveFocus()
         background: BorderSurface {
-          color: Color.popups.background
+          color: Commons.Color.popups.background
           radius: Style.cornerRadius
-          borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
         }
         contentItem: Button {
           id: uninstallAction
           text: "Uninstall plugin…"
-          foreground: Color.urgent
+          foreground: Commons.Color.urgent
           focusable: true
           enabled: setupInspector.presentation.canRemove
           Accessible.role: Accessible.MenuItem
@@ -3809,7 +3810,7 @@ Item {
           text: root.service ? root.service.pluginOutcome(setupInspector.row.id) : "Inventory pending"
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          color: setupInspector.presentation.failed ? Color.urgent : Color.accent
+          color: setupInspector.presentation.failed ? Commons.Color.urgent : Commons.Color.accent
           font.family: root.fontFamily
           font.pixelSize: root.readingSize
           font.bold: true
@@ -4049,7 +4050,7 @@ Item {
             checked: setupInspector.presentation.enabled
             enabled: setupInspector.presentation.canToggle
             foreground: root.foreground
-            accent: Color.accent
+            accent: Commons.Color.accent
             Accessible.role: Accessible.CheckBox
             Accessible.checkable: true
             Accessible.name: label
@@ -4094,7 +4095,7 @@ Item {
             checked: root.draftInstallEnabled
             enabled: setupInspector.presentation.canInstall
             foreground: root.foreground
-            accent: Color.accent
+            accent: Commons.Color.accent
             Accessible.role: Accessible.CheckBox
             Accessible.checkable: true
             Accessible.name: label
@@ -4229,7 +4230,7 @@ Item {
       anchors.margins: Style.space(12)
       height: inspectorFooterContent.implicitHeight + Style.space(18)
       radius: Style.cornerRadius
-      color: Style.selectedFillFor(root.foreground, Color.accent)
+      color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
 
       Column {
         id: inspectorFooterContent
@@ -4244,7 +4245,7 @@ Item {
           text: root.inspectorActionError || setupInspector.presentation.message
             || (setupInspector.presentation.state === "manual" ? "This plugin uses manual setup." : "")
           textFormat: Text.PlainText
-          color: setupInspector.presentation.failed || root.inspectorActionError ? Color.urgent : root.secondary
+          color: setupInspector.presentation.failed || root.inspectorActionError ? Commons.Color.urgent : root.secondary
           font.family: root.fontFamily
           font.pixelSize: root.supportingSize
           wrapMode: Text.WordWrap
@@ -4615,7 +4616,7 @@ Item {
               width: Style.space(25)
               height: width
               kind: "toolbox"
-              tint: Color.accent
+              tint: Commons.Color.accent
             }
 
             Text {
@@ -4643,7 +4644,7 @@ Item {
               text: root.busySubtitle()
               textFormat: Text.PlainText
               color: root.service && root.service.backgroundError && !root.service.backgroundBusy
-                ? Color.urgent : root.secondary
+                ? Commons.Color.urgent : root.secondary
               font.family: root.fontFamily
               font.pixelSize: root.readingSize
               elide: Text.ElideRight
@@ -4658,7 +4659,7 @@ Item {
                 ? root.service.measuredProgress(root.service.startupProgress) : -1
               visible: fraction >= 0
               color: root.faint
-              Rectangle { height: parent.height; width: parent.width * Math.max(0, parent.fraction); color: Color.accent }
+              Rectangle { height: parent.height; width: parent.width * Math.max(0, parent.fraction); color: Commons.Color.accent }
             }
             Row {
               id: startupBannerActions
@@ -4785,9 +4786,9 @@ Item {
             }
             onOpened: moveFocus(1)
             background: BorderSurface {
-              color: Color.popups.background
+              color: Commons.Color.popups.background
               radius: Style.cornerRadius
-              borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
             }
             contentItem: Column {
               id: maintenanceActions
@@ -4873,15 +4874,15 @@ Item {
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
               }
-              PanelSeparator { width: parent.width; foreground: Color.popups.text }
+              PanelSeparator { width: parent.width; foreground: Commons.Color.popups.text }
               ReadmeIndexStatus {
                 id: menuIndexStatus
                 width: parent.width
                 service: root.service
-                foreground: Color.popups.text
+                foreground: Commons.Color.popups.text
                 navigationTarget: maintenanceActions
               }
-              PanelSeparator { width: parent.width; foreground: Color.popups.text }
+              PanelSeparator { width: parent.width; foreground: Commons.Color.popups.text }
               Repeater {
                 model: [
                   {label:"Catalog", time:root.service ? root.service.fetchedAt : 0},
@@ -4893,7 +4894,7 @@ Item {
                   width: parent.width
                   text: modelData.label + " · " + Presentation.relativeAge(modelData.time, maintenanceMenu.clockNow)
                   textFormat: Text.PlainText
-                  color: Color.popups.text
+                  color: Commons.Color.popups.text
                   opacity: 0.7
                   font.family: root.fontFamily
                   font.pixelSize: root.supportingSize
@@ -4905,7 +4906,7 @@ Item {
                 visible: Boolean(text)
                 text: root.service ? String(root.service.dataWarning || "") : ""
                 textFormat: Text.PlainText
-                color: Color.popups.text
+                color: Commons.Color.popups.text
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
                 wrapMode: Text.WordWrap
@@ -4915,7 +4916,7 @@ Item {
                 visible: Boolean(text)
                 text: root.service ? String(root.service.backgroundError || root.service.error || "") : ""
                 textFormat: Text.PlainText
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
                 wrapMode: Text.WordWrap
@@ -5034,7 +5035,7 @@ Item {
           implicitHeight: visible ? statusLabel.implicitHeight + Style.space(14) : 0
           radius: Style.space(7)
           color: root.service && root.service.error
-            ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09) : root.faint
+            ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.09) : root.faint
 
           Text {
             id: statusLabel
@@ -5042,7 +5043,7 @@ Item {
             anchors.margins: Style.space(7)
             text: root.statusText()
             textFormat: Text.PlainText
-            color: root.service && root.service.error ? Color.urgent : root.secondary
+            color: root.service && root.service.error ? Commons.Color.urgent : root.secondary
             font.family: root.fontFamily
             font.pixelSize: root.supportingSize
             wrapMode: Text.WordWrap
@@ -5093,7 +5094,7 @@ Item {
               text: root.service ? root.service.error : ""
               textFormat: Text.PlainText
               horizontalAlignment: Text.AlignHCenter
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: root.readingSize
               wrapMode: Text.WordWrap
@@ -5146,9 +5147,9 @@ Item {
               height: cardContent.implicitHeight + Style.space(20)
               radius: Style.cornerRadius
               color: index === root.selectedIndex
-                ? Style.selectedFillFor(root.foreground, Color.accent) : root.faint
+                ? Style.selectedFillFor(root.foreground, Commons.Color.accent) : root.faint
               borderSpec: index === root.selectedIndex
-                ? Border.controlSpec("selected", root.foreground, Color.accent) : Border.none()
+                ? Border.controlSpec("selected", root.foreground, Commons.Color.accent) : Border.none()
 
               TapHandler { onTapped: root.selectResult(resultCard.index) }
 
@@ -5178,7 +5179,7 @@ Item {
                     id: fitLabel
                     text: "FIT " + Number(resultCard.modelData.score || 0)
                     textFormat: Text.PlainText
-                    color: Color.accent
+                    color: Commons.Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: root.supportingSize
                     font.bold: true
@@ -5190,7 +5191,7 @@ Item {
                     + (resultCard.modelData.firstParty ? "FIRST PARTY / " : "THIRD PARTY / ")
                     + String(resultCard.modelData.category || "Other").toUpperCase()
                   textFormat: Text.PlainText
-                  color: root.effectiveInstalled(resultCard.modelData) ? Color.accent : root.secondary
+                  color: root.effectiveInstalled(resultCard.modelData) ? Commons.Color.accent : root.secondary
                   font.family: root.fontFamily
                   font.pixelSize: root.supportingSize
                   font.bold: root.effectiveInstalled(resultCard.modelData)
@@ -5275,7 +5276,7 @@ Item {
                       verticalAlignment: Text.AlignVCenter
                       text: root.effectiveEnabled(resultCard.modelData) ? "ENABLED" : "DISABLED"
                       textFormat: Text.PlainText
-                      color: root.effectiveEnabled(resultCard.modelData) ? Color.accent : root.secondary
+                      color: root.effectiveEnabled(resultCard.modelData) ? Commons.Color.accent : root.secondary
                       font.family: root.fontFamily
                       font.pixelSize: root.supportingSize
                       font.bold: true
@@ -5286,7 +5287,7 @@ Item {
                       checked: root.effectiveEnabled(resultCard.modelData)
                       busy: root.operationPending(resultCard.modelData)
                       foreground: root.foreground
-                      accent: Color.accent
+                      accent: Commons.Color.accent
                       onToggled: root.togglePlugin(resultCard.modelData)
                     }
                     Text {
@@ -5320,7 +5321,7 @@ Item {
                       text: root.operationPending(resultCard.modelData)
                         ? root.operationProgress(resultCard.modelData) : "Remove plugin"
                       iconText: "X"
-                      foreground: Color.urgent
+                      foreground: Commons.Color.urgent
                       focusable: true
                       enabled: root.service && !root.operationPending(resultCard.modelData)
                         && !root.service.batchRunning && !root.service.selfUpdateBusy
@@ -5336,7 +5337,7 @@ Item {
                       ? root.operationProgress(resultCard.modelData)
                       : root.operationError(resultCard.modelData)
                     textFormat: Text.PlainText
-                    color: root.operationPending(resultCard.modelData) ? Color.accent : Color.urgent
+                    color: root.operationPending(resultCard.modelData) ? Commons.Color.accent : Commons.Color.urgent
                     font.family: root.fontFamily
                     font.pixelSize: root.supportingSize
                     wrapMode: Text.WordWrap
@@ -5449,7 +5450,7 @@ Item {
                       + " / BASE " + Number(root.selectedRow.baseScore || 0)
                     : ""
                   textFormat: Text.PlainText
-                  color: Color.accent
+                  color: Commons.Color.accent
                   font.family: root.fontFamily
                   font.pixelSize: root.readingSize
                   font.bold: true
@@ -5514,7 +5515,7 @@ Item {
                         anchors.right: parent.right
                         text: channelRow.channelValue
                         textFormat: Text.PlainText
-                        color: Color.accent
+                        color: Commons.Color.accent
                         font.family: root.fontFamily
                         font.pixelSize: root.supportingSize
                         font.bold: true
@@ -5529,7 +5530,7 @@ Item {
                         width: parent.width * Math.max(0, Math.min(100, channelRow.channelValue)) / 100
                         height: parent.height
                         radius: height / 2
-                        color: Color.accent
+                        color: Commons.Color.accent
                       }
                     }
 
@@ -5743,7 +5744,7 @@ Item {
                 description: "Run local-only follow-up scans after the automatic opening scan."
                 checked: root.draftWatchHardware
                 foreground: root.foreground
-                accent: Color.accent
+                accent: Commons.Color.accent
                 onClicked: {
                   root.draftWatchHardware = !root.draftWatchHardware
                   root.settingsTouched = true
@@ -5770,7 +5771,7 @@ Item {
                 description: "Index exact-revision GitHub README text in the background while Outfit is open. Search uses local text; inspector previews load on demand."
                 checked: root.draftReadmes
                 foreground: root.foreground
-                accent: Color.accent
+                accent: Commons.Color.accent
                 onClicked: {
                   root.draftReadmes = !root.draftReadmes
                   root.settingsTouched = true
@@ -5783,7 +5784,7 @@ Item {
                 description: "Load small previews for visible browse cards from plugins.omarchy.org. Cached separately from GitHub README media."
                 checked: root.draftThumbnails
                 foreground: root.foreground
-                accent: Color.accent
+                accent: Commons.Color.accent
                 onClicked: {
                   root.draftThumbnails = !root.draftThumbnails
                   root.settingsTouched = true
@@ -5819,7 +5820,7 @@ Item {
                   ? "Unsaved settings are applied only after saving."
                   : "Settings are saved in Outfit's private local configuration."
                 textFormat: Text.PlainText
-                color: root.preferencesDirty ? Color.accent : root.secondary
+                color: root.preferencesDirty ? Commons.Color.accent : root.secondary
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
                 wrapMode: Text.WordWrap
@@ -5834,7 +5835,7 @@ Item {
                 width: parent.width
                 text: root.service ? root.service.error : ""
                 textFormat: Text.PlainText
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
                 wrapMode: Text.WordWrap
@@ -5855,7 +5856,7 @@ Item {
           implicitHeight: visible ? quickSetupStatusText.implicitHeight + Style.space(14) : 0
           radius: Style.space(7)
           color: root.service && root.service.error
-            ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09) : root.faint
+            ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.09) : root.faint
 
           Text {
             id: quickSetupStatusText
@@ -5863,7 +5864,7 @@ Item {
             anchors.margins: Style.space(7)
             text: root.statusText()
             textFormat: Text.PlainText
-            color: root.service && root.service.error ? Color.urgent : root.secondary
+            color: root.service && root.service.error ? Commons.Color.urgent : root.secondary
             font.family: root.fontFamily
             font.pixelSize: root.supportingSize
             wrapMode: Text.WordWrap
@@ -5942,7 +5943,7 @@ Item {
                 width: parent.width
                 text: root.service ? root.service.error : ""
                 textFormat: Text.PlainText
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
                 wrapMode: Text.WordWrap
@@ -6351,7 +6352,7 @@ Item {
                     : root.service && root.service.matches.partial ? "Partial results: some cached README text is unavailable. Matches update as the index completes."
                     : "Last checked: " + root.timeLabel(root.service ? root.service.matches.lastCheckedAt : 0)
                   textFormat: Text.PlainText
-                  color: root.service && root.service.matchesError ? Color.urgent : root.secondary
+                  color: root.service && root.service.matchesError ? Commons.Color.urgent : root.secondary
                   font.family: root.fontFamily
                   font.pixelSize: root.supportingSize
                   wrapMode: Text.WordWrap
@@ -6542,7 +6543,7 @@ Item {
                     width: parent.width
                     text: "Unsaved changes. Save to update recommendations."
                     textFormat: Text.PlainText
-                    color: Color.accent
+                    color: Commons.Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: root.supportingSize
                     wrapMode: Text.WordWrap
@@ -6577,7 +6578,7 @@ Item {
                     width: parent.width
                     text: root.service ? root.service.interestsError : ""
                     textFormat: Text.PlainText
-                    color: Color.urgent
+                    color: Commons.Color.urgent
                     font.family: root.fontFamily
                     font.pixelSize: root.supportingSize
                     wrapMode: Text.WordWrap
@@ -7004,7 +7005,7 @@ Item {
                 text: root.service ? String(root.service.densitySaveError || "") : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: root.supportingSize
               }
@@ -7110,7 +7111,7 @@ Item {
                 implicitHeight: setupStatusMessage.implicitHeight + Style.space(14)
                 radius: Style.space(7)
                 color: root.service && root.service.error
-                  ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09)
+                  ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.09)
                   : root.faint
 
                 Text {
@@ -7119,7 +7120,7 @@ Item {
                   anchors.margins: Style.space(7)
                   text: root.statusText()
                   textFormat: Text.PlainText
-                  color: root.service && root.service.error ? Color.urgent : root.secondary
+                  color: root.service && root.service.error ? Commons.Color.urgent : root.secondary
                   font.family: root.fontFamily
                   font.pixelSize: root.supportingSize
                   wrapMode: Text.WordWrap
@@ -7308,7 +7309,7 @@ Item {
               anchors.bottom: parent.bottom
               height: Style.space(58)
               radius: Style.cornerRadius
-              color: Style.selectedFillFor(root.foreground, Color.accent)
+              color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
 
               Row {
                 anchors.fill: parent
@@ -7498,7 +7499,7 @@ Item {
                         Button {
                           id: removeSetupChoice
                           text: "Remove from batch"
-                          foreground: Color.urgent
+                          foreground: Commons.Color.urgent
                           focusable: true
                           onClicked: root.service.setSetupSelected(setupReviewCard.modelData, false)
                         }
@@ -7541,7 +7542,7 @@ Item {
                         description: "This plugin replaces a shared shell role. Leave off to install without switching."
                         checked: setupReviewCard.modelData.activate === true
                         foreground: root.foreground
-                        accent: Color.accent
+                        accent: Commons.Color.accent
                         onClicked: root.service.updateSetupOption(
                           setupReviewCard.modelData.id, "activate",
                           setupReviewCard.modelData.activate !== true)
@@ -7568,7 +7569,7 @@ Item {
                             && setupReviewCard.modelData.activate !== true
                             ? "INSTALL ONLY" : "INSTALL AND ENABLE"
                           textFormat: Text.PlainText
-                          color: Color.accent
+                          color: Commons.Color.accent
                           font.family: root.fontFamily
                           font.pixelSize: root.supportingSize
                           font.bold: true
@@ -7676,7 +7677,7 @@ Item {
                       ? root.service.batchItems.length : 0))
                   height: parent.height
                   radius: height / 2
-                  color: Color.accent
+                  color: Commons.Color.accent
                 }
               }
             }
@@ -7707,7 +7708,7 @@ Item {
                     height: setupProgressContent.implicitHeight + Style.space(18)
                     radius: Style.cornerRadius
                     color: modelData.status === "failed" || modelData.status === "partial"
-                      ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.08) : root.faint
+                      ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.08) : root.faint
 
                     Column {
                       id: setupProgressContent
@@ -7739,7 +7740,7 @@ Item {
                           textFormat: Text.PlainText
                           color: setupProgressRow.modelData.status === "failed"
                             || setupProgressRow.modelData.status === "partial"
-                            ? Color.urgent : Color.accent
+                            ? Commons.Color.urgent : Commons.Color.accent
                           font.family: root.fontFamily
                           font.pixelSize: root.supportingSize
                           font.bold: true
@@ -7804,7 +7805,7 @@ Item {
                   visible: root.service && root.service.batchRunning
                   text: (root.service.batchStopRequested ? "Stopping after current " : "Stop after current ")
                     + (root.updateBatch ? "update" : "install")
-                  foreground: Color.urgent
+                  foreground: Commons.Color.urgent
                   bordered: true
                   focusable: true
                   enabled: !root.service.batchStopRequested
@@ -7882,7 +7883,7 @@ Item {
         background: BorderSurface {
           color: root.background
           radius: Style.cornerRadius
-          borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
         }
         contentItem: Item {
           Column {
@@ -7951,7 +7952,7 @@ Item {
               visible: Boolean(text)
               text: root.updateReviewError
               textFormat: Text.PlainText
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: root.readingSize
               wrapMode: Text.Wrap

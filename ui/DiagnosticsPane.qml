@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls as C
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Typography.js" as Typography
 
@@ -24,7 +25,7 @@ Column {
   Text {
     text: "DIAGNOSTICS"
     textFormat: Text.PlainText
-    color: Color.foreground
+    color: Commons.Color.foreground
     font.family: Style.font.family
     font.pixelSize: root.readingSize
     font.bold: true
@@ -34,7 +35,7 @@ Column {
     text: "Versions, storage, and cache status. Personal details excluded."
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
-    color: Color.foreground
+    color: Commons.Color.foreground
     font.family: Style.font.family
     font.pixelSize: root.readingSize
   }
@@ -45,7 +46,7 @@ Column {
       + "\nSystem: " + root.exactTime(root.service ? root.service.lastHardwareCheckAt / 1000 : 0)
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
-    color: Color.foreground
+    color: Commons.Color.foreground
     font.family: Style.font.family
     font.pixelSize: root.supportingSize
   }
@@ -89,10 +90,10 @@ Column {
       selectByMouse: true
       textFormat: TextEdit.PlainText
       wrapMode: TextEdit.Wrap
-      color: Color.foreground
+      color: Commons.Color.foreground
       font.family: Style.font.family
       font.pixelSize: root.supportingSize
-      background: Rectangle { color: Color.background }
+      background: Rectangle { color: Commons.Color.background }
     }
   }
 }

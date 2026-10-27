@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Controls as C
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Typography.js" as Typography
 import "Navigation.js" as Navigation
@@ -51,7 +52,7 @@ FocusScope {
   signal updateRequested()
   signal updateCheckRequested()
 
-  readonly property color foreground: Color.foreground
+  readonly property color foreground: Commons.Color.foreground
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.66)
   readonly property color faint: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.045)
   readonly property bool compact: width < Style.space(1000)
@@ -347,7 +348,7 @@ FocusScope {
       anchors.fill: parent
       anchors.margins: -Style.space(2)
       color: "transparent"
-      border.color: Color.accent
+      border.color: Commons.Color.accent
       radius: Style.space(2)
       visible: metric.activeFocus
     }
@@ -361,7 +362,7 @@ FocusScope {
         wrapMode: Text.NoWrap
         font.pixelSize: root.valueSize
         font.bold: true
-        color: metric.score ? Color.accent : root.foreground
+        color: metric.score ? Commons.Color.accent : root.foreground
       }
       Row {
         id: metricLabel
@@ -380,7 +381,7 @@ FocusScope {
           width: root.iconSize; height: root.iconSize
           sourceComponent: OutfitIcon {
             kind: "info"
-            tint: metric.activeFocus || metricHover.hovered ? Color.accent : root.muted
+            tint: metric.activeFocus || metricHover.hovered ? Commons.Color.accent : root.muted
           }
         }
       }
@@ -410,9 +411,9 @@ FocusScope {
         color: root.foreground
       }
       background: BorderSurface {
-        color: Color.background
+        color: Commons.Color.background
         radius: Style.cornerRadius
-        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
       }
     }
   }
@@ -439,7 +440,7 @@ FocusScope {
     descriptionSize: root.supportingSize
     implicitHeight: Math.max(Style.space(40), controlMetrics.height + Style.space(14))
     foreground: root.foreground
-    accent: Color.accent
+    accent: Commons.Color.accent
     opacity: enabled ? 1 : 0.45
     Accessible.role: Accessible.CheckBox
     Accessible.name: label
@@ -450,7 +451,7 @@ FocusScope {
 
   Rectangle {
     anchors.fill: parent
-    color: Color.background
+    color: Commons.Color.background
     MouseArea {
       anchors.fill: parent
       acceptedButtons: Qt.AllButtons
@@ -486,7 +487,7 @@ FocusScope {
           visible: Boolean(root.prototypeLabel)
           text: root.prototypeLabel
           fontSize: root.readingSize
-          foreground: Color.accent
+          foreground: Commons.Color.accent
           onClicked: root.prototypeRequested()
         }
         Row {
@@ -534,7 +535,7 @@ FocusScope {
         Caption {
           text: root.pluginRow.verification === "verified" ? "✓ Marketplace verified"
             : root.pluginRow.verification === "unverified" ? "Not marketplace verified" : "Verification not reported"
-          color: root.pluginRow.verification === "verified" ? Color.accent : root.muted
+          color: root.pluginRow.verification === "verified" ? Commons.Color.accent : root.muted
         }
       }
       Rule { width: parent.width }
@@ -616,7 +617,7 @@ FocusScope {
               height: metricContent.implicitHeight + padding * 2
               color: root.faint
               radius: Style.cornerRadius
-              borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
               Flow {
                 id: metricContent
                 // Keep the existing lookup name; scores now share this Flow
@@ -662,7 +663,7 @@ FocusScope {
                 Style.space(overview.beside ? 130 : root.shortWindow ? 210 : 310)))
               color: root.faint
               radius: Style.cornerRadius
-              borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
               Image {
                 id: preview
                 objectName: "detailPreview"
@@ -701,7 +702,7 @@ FocusScope {
                 Rectangle {
                   anchors.fill: parent
                   color: "transparent"
-                  border.color: Color.accent
+                  border.color: Commons.Color.accent
                   border.width: Style.space(2)
                   visible: preview.activeFocus
                 }
@@ -822,7 +823,7 @@ FocusScope {
               text: root.pluginRow.matchLabel || ""
               height: Style.space(32)
               verticalAlignment: Text.AlignVCenter
-              color: Color.accent
+              color: Commons.Color.accent
             }
             Action {
               objectName: "detailReview"
@@ -921,7 +922,7 @@ FocusScope {
       height: controls.implicitHeight + Style.space(root.compact ? 20 : 32)
       color: root.faint
       radius: Style.cornerRadius
-      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+      borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
 
       Column {
         id: controls
@@ -958,7 +959,7 @@ FocusScope {
               objectName: "detailLocalState"
               width: parent.width
               text: root.localState
-              color: Color.accent
+              color: Commons.Color.accent
               font.bold: true
               font.pixelSize: root.readingSize
             }
@@ -1090,7 +1091,7 @@ FocusScope {
           visible: Boolean(text)
           width: parent.width
           text: root.statusMessage
-          color: root.presentation.failed ? Color.urgent : root.muted
+          color: root.presentation.failed ? Commons.Color.urgent : root.muted
           maximumLineCount: root.compact ? 2 : 5
           elide: Text.ElideRight
         }
@@ -1126,7 +1127,7 @@ FocusScope {
     closePolicy: C.Popup.CloseOnEscape
     onOpened: closePreview.forceActiveFocus()
     onClosed: if (root.mediaActive) preview.forceActiveFocus()
-    background: BorderSurface { color: Color.background; radius: Style.cornerRadius }
+    background: BorderSurface { color: Commons.Color.background; radius: Style.cornerRadius }
     contentItem: Item {
       Action {
         id: closePreview
@@ -1163,7 +1164,7 @@ FocusScope {
     modal: true
     focus: true
     closePolicy: C.Popup.CloseOnEscape | C.Popup.CloseOnPressOutside
-    background: BorderSurface { color: Color.background; radius: Style.cornerRadius; borderSpec: Border.controlSpec("normal", root.foreground, Color.accent) }
+    background: BorderSurface { color: Commons.Color.background; radius: Style.cornerRadius; borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent) }
     contentItem: Column {
       spacing: Style.space(16)
       Copy { width: parent.width; text: root.statusMessage }

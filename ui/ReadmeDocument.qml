@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as C
 import qs.Commons
+import qs.Commons as Commons
 import "Typography.js" as Typography
 import "SafeReadme.js" as SafeReadme
 
@@ -14,7 +15,7 @@ Column {
   property bool loading: false
   property bool enrichmentEnabled: true
   readonly property real readingSize: Typography.reading(Style.font)
-  readonly property color foreground: Color.foreground
+  readonly property color foreground: Commons.Color.foreground
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.68)
   readonly property color faint: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.055)
   readonly property bool hasBlocks: enrichmentEnabled && SafeReadme.isList(blocks) && blocks.length > 0
@@ -45,8 +46,8 @@ Column {
     wrapMode: TextEdit.Wrap
     textFormat: TextEdit.RichText
     color: root.foreground
-    selectionColor: Color.accent
-    selectedTextColor: Color.background
+    selectionColor: Commons.Color.accent
+    selectedTextColor: Commons.Color.background
     font.family: Style.font.family
     font.pixelSize: root.readingSize
     height: implicitHeight
@@ -77,7 +78,7 @@ Column {
         font.family: Style.font.family
         font.pixelSize: Typography.supporting(Style.font)
       }
-      background: Rectangle { color: Color.background; border.color: Color.accent; radius: Style.cornerRadius }
+      background: Rectangle { color: Commons.Color.background; border.color: Commons.Color.accent; radius: Style.cornerRadius }
     }
   }
 
@@ -127,7 +128,7 @@ Column {
         Rectangle {
           visible: block.kind === "quote"
           width: Style.space(3); height: parent.height
-          color: Color.accent
+          color: Commons.Color.accent
         }
         Text {
           id: marker
@@ -136,7 +137,7 @@ Column {
           width: visible ? Math.max(implicitWidth, Style.space(20)) : 0
           text: String(block.modelData.marker || "•")
           textFormat: Text.PlainText
-          color: Color.accent
+          color: Commons.Color.accent
           font.family: Style.font.family
           font.pixelSize: root.readingSize
         }
@@ -147,7 +148,7 @@ Column {
           y: block.inset
           width: Math.max(1, parent.width - x - block.inset)
           textFormat: block.code ? TextEdit.PlainText : TextEdit.RichText
-          text: block.code ? String(block.modelData.text || "") : SafeReadme.rich(block.modelData.inlines, Color.accent)
+          text: block.code ? String(block.modelData.text || "") : SafeReadme.rich(block.modelData.inlines, Commons.Color.accent)
           font.family: block.code ? (Style.font.monoFamily || "monospace") : Style.font.family
           font.pixelSize: block.kind === "heading"
             ? root.readingSize * (Number(block.modelData.level) === 1 ? 1.65 : Number(block.modelData.level) === 2 ? 1.35 : 1.12)
@@ -185,7 +186,7 @@ Column {
                   width: cells.width / Math.max(1, tableRow.modelData.length)
                   padding: Style.space(8)
                   font.bold: tableRow.index === 0
-                  text: SafeReadme.rich(modelData, Color.accent)
+                  text: SafeReadme.rich(modelData, Commons.Color.accent)
                 }
               }
             }

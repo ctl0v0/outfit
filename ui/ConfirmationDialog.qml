@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Keep Outfit's confirmation actions on the same themed Button component as
@@ -11,8 +12,8 @@ Item {
   property string cancelText: "Cancel"
   property string confirmText: "Confirm"
   property int selectedIndex: 0
-  property color background: Color.background
-  property color foreground: Color.foreground
+  property color background: Commons.Color.background
+  property color foreground: Commons.Color.foreground
   property real cornerRadius: Style.cornerRadius
   signal canceled()
   signal confirmed()
@@ -33,7 +34,7 @@ Item {
 
   Rectangle {
     anchors.fill: parent
-    color: Qt.rgba(Color.background.r,Color.background.g,Color.background.b,0.7)
+    color: Qt.rgba(Commons.Color.background.r,Commons.Color.background.g,Commons.Color.background.b,0.7)
     MouseArea { anchors.fill: parent; onClicked: root.canceled() }
   }
   BorderSurface {
@@ -42,7 +43,7 @@ Item {
     height: content.implicitHeight + Style.space(36)
     color: root.background
     radius: root.cornerRadius
-    borderSpec: Border.controlSpec("focus",root.foreground,Color.accent)
+    borderSpec: Border.controlSpec("focus",root.foreground,Commons.Color.accent)
     MouseArea { anchors.fill: parent; onClicked: {} }
     Column {
       id: content
@@ -74,8 +75,8 @@ Item {
             radius: root.cornerRadius
             bordered: true
             selected: root.selectedIndex === index
-            foreground: index === 1 ? Color.urgent : root.foreground
-            accent: index === 1 ? Color.urgent : Color.accent
+            foreground: index === 1 ? Commons.Color.urgent : root.foreground
+            accent: index === 1 ? Commons.Color.urgent : Commons.Color.accent
             fontFamily: Style.font.family
             fontSize: Style.font.caption
             onHotChanged: if (hot) root.selectedIndex = index

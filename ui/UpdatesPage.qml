@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as C
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Typography.js" as Typography
 import "InspectorState.js" as InspectorState
@@ -203,7 +204,7 @@ FocusScope {
   }
   component Copy: Text {
     textFormat: Text.PlainText
-    color: Color.foreground
+    color: Commons.Color.foreground
     font.family: Style.font.family
     font.pixelSize: root.readingSize
     wrapMode: Text.Wrap
@@ -215,7 +216,7 @@ FocusScope {
     property string rowId: ""
     property string actionKind: "details"
     fontSize: root.readingSize
-    foreground: Color.foreground
+    foreground: Commons.Color.foreground
     bordered: true
     focusable: true
     opacity: enabled ? 1 : 0.45
@@ -275,12 +276,12 @@ FocusScope {
       + (expanded ? explanation.implicitHeight + root.rowPadding : 0)
     Rectangle {
       anchors.fill: parent
-      color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, card.index % 2 === 0 ? 0.035 : 0)
+      color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, card.index % 2 === 0 ? 0.035 : 0)
     }
     Rectangle {
       anchors.bottom: parent.bottom
       width: parent.width; height: 1
-      color: Color.foreground; opacity: 0.12
+      color: Commons.Color.foreground; opacity: 0.12
     }
     Row {
       id: cells
@@ -323,7 +324,7 @@ FocusScope {
         objectName: "updateStatusCell." + card.modelData.id
         width: root.statusWidth
         text: root.statusLabel(card.modelData)
-        color: InspectorState.eligibleUpdate(card.modelData) ? Color.accent : Color.foreground
+        color: InspectorState.eligibleUpdate(card.modelData) ? Commons.Color.accent : Commons.Color.foreground
         maximumLineCount: 2
         elide: Text.ElideRight
       }
@@ -437,7 +438,7 @@ FocusScope {
       id: search
       objectName: "updatesSearch"
       width: parent.width
-      foreground: Color.foreground
+      foreground: Commons.Color.foreground
       font.pixelSize: root.readingSize
       placeholderText: "Search installed plugins"
       maximumLength: 160
@@ -452,7 +453,7 @@ FocusScope {
       objectName: "updatesError"
       width: parent.width
       visible: Boolean(text)
-      color: Color.urgent
+      color: Commons.Color.urgent
       text: root.notice || (root.service ? String(root.service.updatesError || "") : "")
     }
     Copy {
@@ -499,7 +500,7 @@ FocusScope {
           }
         }
       }
-      Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Color.foreground; opacity: 0.2 }
+      Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Commons.Color.foreground; opacity: 0.2 }
     }
   }
   ContentScrollView {

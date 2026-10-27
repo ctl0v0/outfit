@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "ui" as OutfitUi
 
@@ -79,7 +80,7 @@ BarWidget {
     width: parent.width * 0.55
     height: Math.max(1, Style.spacing.hairline)
     radius: height / 2
-    color: Color.accent
+    color: Commons.Color.accent
 
     SequentialAnimation on opacity {
       running: parent.visible

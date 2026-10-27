@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as C
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Typography.js" as Typography
 import "Presentation.js" as Presentation
@@ -22,7 +23,7 @@ Item {
   readonly property bool compactSaveBar: height < Style.space(500)
   readonly property bool active: visible && service !== null && service.editorOpen === true
   readonly property string section: service && service.interestsSection === "added" ? "added" : "detected"
-  readonly property color foreground: Color.foreground
+  readonly property color foreground: Commons.Color.foreground
   readonly property color secondary: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.65)
   property bool scanDetailsExpanded: false
   property double now: Date.now()
@@ -301,19 +302,19 @@ Item {
           objectName: "interestScanError"
           visible: Boolean(root.scanWarning)
           text: root.scanWarning
-          color: root.service && root.service.scanError || ["failed", "error", "unavailable"].indexOf(String(root.inputs.scanState)) >= 0 ? Color.urgent : root.secondary
+          color: root.service && root.service.scanError || ["failed", "error", "unavailable"].indexOf(String(root.inputs.scanState)) >= 0 ? Commons.Color.urgent : root.secondary
         }
         Column {
           width: parent.width; spacing: Style.space(5); visible: root.scanDetailsExpanded
           Copy { text: root.inputs.checkedAt ? "Last checked: " + new Date(Number(root.inputs.checkedAt) * 1000).toLocaleString() : "No completed scan"; color: root.secondary }
           Copy { text: "Selected suggestion inputs, not a complete hardware inventory."; color: root.secondary }
-          Copy { visible: Boolean(text); text: root.service ? root.service.scanError : ""; color: Color.urgent }
+          Copy { visible: Boolean(text); text: root.service ? root.service.scanError : ""; color: Commons.Color.urgent }
           Repeater {
             objectName: "visibleProbeStatuses"; model: root.inputs.probes || []
             Copy {
               required property var modelData
               text: root.probeLabel(modelData.id) + " · " + root.probeState(modelData.state) + (modelData.reason ? " · " + modelData.reason : "")
-              color: modelData.state === "success" ? root.secondary : Color.urgent
+              color: modelData.state === "success" ? root.secondary : Commons.Color.urgent
             }
           }
         }
@@ -427,7 +428,7 @@ Item {
         Copy {
           visible: choiceSearch.text.trim().length > 64
           text: "Custom topics use the search text as one term (up to 64 characters). Shorten it to add."
-          color: Color.urgent
+          color: Commons.Color.urgent
         }
         Copy {
           objectName: "selectedInterestCount"
@@ -605,21 +606,21 @@ Item {
     anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
     height: footerContent.implicitHeight + Style.space(12)
     radius: Style.cornerRadius
-    color: root.unsaved || root.saving ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+    color: root.unsaved || root.saving ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
       : "transparent"
-    borderSpec: root.unsaved || root.saving ? Border.controlSpec("normal", Color.accent, Color.accent) : Border.none()
+    borderSpec: root.unsaved || root.saving ? Border.controlSpec("normal", Commons.Color.accent, Commons.Color.accent) : Border.none()
     Rectangle {
       anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
       width: Style.space(3)
       visible: root.unsaved || root.saving
-      color: Color.accent
+      color: Commons.Color.accent
     }
     Column {
       id: footerContent
       x: Style.space(12); y: Style.space(6)
       width: parent.width - Style.space(24)
       spacing: Style.space(6)
-      Copy { visible: Boolean(text); text: root.service ? root.service.interestsError : ""; color: Color.urgent }
+      Copy { visible: Boolean(text); text: root.service ? root.service.interestsError : ""; color: Commons.Color.urgent }
       Copy {
         visible: Boolean(text) && (root.unsaved || text.indexOf("Interests saved") !== 0)
         text: root.service ? root.service.interestsNotice : ""
@@ -638,7 +639,7 @@ Item {
           Copy {
             objectName: "interestsSaveStatus"
             text: root.saving ? "Saving changes…" : root.unsaved ? "Unsaved changes" : "All changes saved"
-            color: root.unsaved || root.saving ? Color.accent : root.secondary
+            color: root.unsaved || root.saving ? Commons.Color.accent : root.secondary
             font.bold: root.unsaved || root.saving
             Accessible.name: text
           }
@@ -663,7 +664,7 @@ Item {
           Action {
             objectName: "saveInterestsButton"; text: root.saving ? "Saving…" : "Save changes"
             selected: root.unsaved || root.saving
-            foreground: root.unsaved || root.saving ? Color.accent : root.foreground
+            foreground: root.unsaved || root.saving ? Commons.Color.accent : root.foreground
             enabled: root.draft !== null && root.service && root.unsaved && !root.service.busy
             onClicked: {
               if (root.service.saveInterests()) root.chooseSection(root.section, true)
