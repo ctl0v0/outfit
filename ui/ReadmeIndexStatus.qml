@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Typography.js" as Typography
 
@@ -9,7 +10,7 @@ Column {
   readonly property real supportingSize: Typography.supporting(Style.font)
   property var service: null
   property var navigationTarget: null
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   readonly property var counts: service && service.readmeIndex ? service.readmeIndex : ({})
   readonly property var documents: counts.documents ? (service.documentCounts || counts.documents) : null
   readonly property alias toggleButton: indexToggle
@@ -52,7 +53,7 @@ Column {
     text: root.service ? String(root.service.readmeIndexError || root.counts.error || "") : ""
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
-    color: Color.urgent
+    color: Commons.Color.urgent
     font.family: Style.font.family
     font.pixelSize: root.readingSize
   }

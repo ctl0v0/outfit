@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as C
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Typography.js" as Typography
 
@@ -133,9 +134,9 @@ C.Popup {
     reveal(target)
   }
   background: BorderSurface {
-    color: Color.popups.background
+    color: Commons.Color.popups.background
     radius: Style.cornerRadius
-    borderSpec: Border.controlSpec("normal", Color.popups.text, Color.accent)
+    borderSpec: Border.controlSpec("normal", Commons.Color.popups.text, Commons.Color.accent)
   }
   contentItem: ContentScrollView {
     id: scrolling
@@ -156,7 +157,7 @@ C.Popup {
     Text {
       width: parent.width
       text: "Background activity"
-      color: Color.popups.text
+      color: Commons.Color.popups.text
       font.family: Style.font.family
       font.pixelSize: Typography.reading(Style.font)
       font.bold: true
@@ -175,7 +176,7 @@ C.Popup {
         readonly property real fraction: root.service ? root.service.measuredProgress(progress) : -1
         Text {
           text: stage.modelData.title
-          color: Color.popups.text
+          color: Commons.Color.popups.text
           font.family: Style.font.family
           font.pixelSize: Typography.supporting(Style.font)
           font.bold: true
@@ -185,7 +186,7 @@ C.Popup {
           text: root.description(stage.modelData.lane)
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          color: Color.popups.text
+          color: Commons.Color.popups.text
           font.family: Style.font.family
           font.pixelSize: Typography.supporting(Style.font)
         }
@@ -193,8 +194,8 @@ C.Popup {
           width: parent.width
           height: Style.space(2)
           visible: stage.progress.state === "running" && stage.fraction >= 0
-          color: Qt.alpha(Color.popups.text, 0.15)
-          Rectangle { height: parent.height; width: parent.width * Math.max(0, stage.fraction); color: Color.accent }
+          color: Qt.alpha(Commons.Color.popups.text, 0.15)
+          Rectangle { height: parent.height; width: parent.width * Math.max(0, stage.fraction); color: Commons.Color.accent }
           Accessible.name: "Measured progress " + Math.round(stage.fraction * 100) + " percent"
         }
         Text {
@@ -203,7 +204,7 @@ C.Popup {
           text: stage.modelData.lane === "documentation" ? root.coverage() : ""
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          color: Color.popups.text
+          color: Commons.Color.popups.text
           font.family: Style.font.family
           font.pixelSize: Typography.supporting(Style.font)
         }
@@ -214,7 +215,7 @@ C.Popup {
             || (stage.modelData.lane === "documentation" && root.service && root.service.searchPackFailed === true)
           text: stage.modelData.lane === "documentation" && root.service && root.service.searchPackFailed
             ? "Retry search library" : "Retry " + stage.modelData.title.split(" · ")[0].toLowerCase()
-          foreground: Color.popups.text
+          foreground: Commons.Color.popups.text
           fontSize: Typography.supporting(Style.font)
           bordered: true
           focusable: true
@@ -233,7 +234,7 @@ C.Popup {
       text: root.service && root.service.preferences.readmeIndexing === false ? "Resume documentation" : "Pause documentation"
       visible: root.service && root.service.preferences.readmeEnrichment !== false
       enabled: root.service && !root.service.busy
-      foreground: Color.popups.text
+      foreground: Commons.Color.popups.text
       fontSize: Typography.supporting(Style.font)
       bordered: true
       focusable: true
@@ -244,7 +245,7 @@ C.Popup {
       width: parent.width
       text: "Unavailable documents count as checked. Cached coverage means searchable text, not that every check has run."
       wrapMode: Text.WordWrap
-      color: Color.popups.text
+      color: Commons.Color.popups.text
       opacity: 0.7
       font.family: Style.font.family
       font.pixelSize: Typography.supporting(Style.font)
@@ -253,7 +254,7 @@ C.Popup {
       id: closeButton
       objectName: "activityClose"
       text: "Close details"
-      foreground: Color.popups.text
+      foreground: Commons.Color.popups.text
       fontSize: Typography.supporting(Style.font)
       focusable: true
       onActiveFocusChanged: if (activeFocus) root.reveal(this)

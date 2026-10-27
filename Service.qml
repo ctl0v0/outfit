@@ -132,6 +132,23 @@ Item {
   property var scan: ({state:"unavailable", checkedAt:0, probes:[], observations:[]})
   property string scanError: ""
   property var installed: []
+
+  // Converts sequence-style values (V4Sequence under Qt 6.12) into plain heap
+  // JS arrays so Array.isArray()-style guards keep working on signal results.
+
+  // True when value looks present and array-like (heap array or V4Sequence).
+  function arrayPresent(value) {
+    return Array.isArray(value)
+      || Boolean(value && typeof value === "object" && typeof value.length === "number")
+  }
+
+  function arrayFrom(value) {
+    if (Array.isArray(value)) return value
+    if (value && typeof value === "object" && typeof value.length === "number") {
+      try { return JSON.parse(JSON.stringify(value)) } catch (error) { return [] }
+    }
+    return []
+  }
   property var inventory: []
   property var updates: []
   property bool updatesLoaded: false
@@ -168,7 +185,7 @@ Item {
       root.nextUpdatesCheckAt = 0
       return
     }
-    if (!result || result.ok !== true || result.inventoryAuthoritative !== true || !Array.isArray(result.updates)) {
+    if (!result || result.ok !== true || result.inventoryAuthoritative !== true || !arrayPresent(result.updates)) {
       root.updatesError = String(result && (result.updatesError || result.error) || "Could not check plugin updates.").slice(0, 300)
       root.nextUpdatesCheckAt = Date.now() + 300000
       return
@@ -179,7 +196,7 @@ Item {
     root.updatesError = String(result.updatesError || "").slice(0, 300)
     // Merge only version facts from this generation; do not publish an older
     // inventory over a management operation or a newer scan.
-    if (Array.isArray(result.inventory)) root.inventory = result.inventory
+    root.inventory = arrayFrom(result.inventory)
     var oldest = root.updates.reduce(function(value, row) {
       return Math.min(value, Number(row.checkedAt) || value)
     }, Date.now() / 1000)
@@ -449,9 +466,9 @@ Item {
       root.setActivity("inventory", {state:"error"})
       return
     }
-    root.inventory = Array.isArray(result.inventory) ? result.inventory : []
-    root.installed = Array.isArray(result.installed) ? result.installed : []
-    root.unavailable = Array.isArray(result.unavailable) ? result.unavailable : []
+    root.inventory = arrayFrom(result.inventory)
+    root.installed = arrayFrom(result.installed)
+    root.unavailable = arrayFrom(result.unavailable)
     root.inventoryReady = true
     root.inventoryRevision++
     root.setActivity("inventory", {state:"complete"})
@@ -472,7 +489,7 @@ Item {
     if (result && result.cancelled) { root.setActivity("catalog", {state:"waiting"}); root.resumeStartupLater(); return }
     if (!result || result.ok !== true) { root.setActivity("catalog", {state:"error"}); return }
     if ("catalogCount" in result) root.catalogCount = Math.max(0, Number(result.catalogCount) || 0)
-    if (Array.isArray(result.categories)) root.categories = result.categories
+    root.categories = arrayFrom(result.categories)
     if ("catalogSource" in result) root.catalogSource = String(result.catalogSource)
     if ("catalogBuiltAt" in result) root.catalogBuiltAt = String(result.catalogBuiltAt || "")
     if ("sourceDate" in result) root.sourceDate = String(result.sourceDate || "")
@@ -1374,16 +1391,16 @@ Item {
     }
     if (scanning) {
       root.scanError = ""
-      root.profile = Array.isArray(result.profile) ? result.profile : []
+      root.profile = arrayFrom(result.profile)
       if (result.scan) root.scan = result.scan
       // Optional hardware may finish after inventory or a native mutation. Only
       // an authoritative, current inventory snapshot may change plugin state.
       if (!root.mutationBusy && Number(request.inventoryRevision) === root.inventoryRevision
           && result.inventoryAuthoritative === true) {
         root.inventoryReady = true
-        root.inventory = Array.isArray(result.inventory) ? result.inventory : []
-        root.installed = Array.isArray(result.installed) ? result.installed : []
-        root.unavailable = Array.isArray(result.unavailable) ? result.unavailable : []
+        root.inventory = arrayFrom(result.inventory)
+        root.installed = arrayFrom(result.installed)
+        root.unavailable = arrayFrom(result.unavailable)
         root.inventoryRevision++
         root.setActivity("inventory", {state:"complete"})
       }
@@ -3507,7 +3524,7 @@ Item {
         root.requestDiscovery()
         return true
       }
-      var picks = result.discovery && Array.isArray(result.discovery.rows) ? result.discovery.rows.slice(0, 3) : []
+      var picks = result.discovery && arrayPresent(result.discovery.rows) ? result.discovery.rows.slice(0, 3) : []
       root.discoveryRows = picks
       root.discoveryError = String(result.error || "")
       var history = root.discoveryHistory.slice(0, root.discoveryHistoryIndex + 1)
@@ -3538,20 +3555,20 @@ Item {
       if (completedRequest.action === "readme-plugin") {
         root.readmePluginId = String(result.readmePluginId || "")
         root.readmeContent = String(result.readmeContent || "")
-        root.readmeBlocks = Array.isArray(result.readmeBlocks) ? result.readmeBlocks : []
-        root.readmeMedia = Array.isArray(result.readmeMedia) ? result.readmeMedia : []
+        root.readmeBlocks = arrayFrom(result.readmeBlocks)
+        root.readmeMedia = arrayFrom(result.readmeMedia)
         root.readmeMediaIndexed = result.readmeMediaIndexed === true
       }
       return true
     }
 
     var localAcknowledgement = ["load", "save-preferences"].indexOf(result.action) >= 0
-    if (!localAcknowledgement && Array.isArray(result.profile)) root.profile = result.profile
+    if (!localAcknowledgement && arrayPresent(result.profile)) root.profile = arrayFrom(result.profile)
     var acceptInventory = !localAcknowledgement && (result.action !== "verify-inventory"
       || result.inventoryAuthoritative === true)
-    if (acceptInventory && Array.isArray(result.installed)) root.installed = result.installed
-    if (acceptInventory && Array.isArray(result.inventory)) root.inventory = result.inventory
-    if (!localAcknowledgement && Array.isArray(result.unavailable)) root.unavailable = result.unavailable
+    if (acceptInventory && arrayPresent(result.installed)) root.installed = arrayFrom(result.installed)
+    if (acceptInventory && arrayPresent(result.inventory)) root.inventory = arrayFrom(result.inventory)
+    if (!localAcknowledgement && arrayPresent(result.unavailable)) root.unavailable = arrayFrom(result.unavailable)
     if (result.action === "verify-inventory") {
       root.inventoryReady = acceptInventory
       root.setActivity("inventory", {state:acceptInventory ? "complete" : "error"})
@@ -3578,8 +3595,8 @@ Item {
         root.serviceOptions = result.setup.services || []
       }
       root.cacheLoaded = true
-      root.rows = Array.isArray(result.rows) ? result.rows : []
-      root.categories = Array.isArray(result.categories) ? result.categories : []
+      root.rows = arrayFrom(result.rows)
+      root.categories = arrayFrom(result.categories)
       root.changes = result.changes && typeof result.changes === "object"
         ? result.changes : ({ added: [], removed: [] })
       root.filterCounts = result.filterCounts && typeof result.filterCounts === "object"
@@ -3613,8 +3630,8 @@ Item {
         root.setupVerification = String(setup.verification || "all")
       }
     } else {
-      root.rows = Array.isArray(result.rows) ? result.rows : []
-      root.categories = Array.isArray(result.categories) ? result.categories : []
+      root.rows = arrayFrom(result.rows)
+      root.categories = arrayFrom(result.categories)
       root.changes = result.changes && typeof result.changes === "object"
         ? result.changes : ({ added: [], removed: [] })
       root.filterCounts = result.filterCounts && typeof result.filterCounts === "object"
@@ -3626,8 +3643,8 @@ Item {
       root.readmesFetched = Math.max(0, Number(result.readmesFetched) || 0)
       root.readmePluginId = String(result.readmePluginId || "")
       root.readmeContent = String(result.readmeContent || "")
-      root.readmeBlocks = Array.isArray(result.readmeBlocks) ? result.readmeBlocks : []
-      root.readmeMedia = Array.isArray(result.readmeMedia) ? result.readmeMedia : []
+      root.readmeBlocks = arrayFrom(result.readmeBlocks)
+      root.readmeMedia = arrayFrom(result.readmeMedia)
       root.readmeMediaIndexed = result.readmeMediaIndexed === true
     }
     if (result.preferences && typeof result.preferences === "object")
@@ -3832,12 +3849,12 @@ Item {
     }
 
     var authoritative = result.inventoryAuthoritative === true
-    if (authoritative && Array.isArray(result.inventory)) {
-      root.inventory = result.inventory
-      root.installed = Array.isArray(result.installed) ? result.installed : []
+    if (authoritative && arrayPresent(result.inventory)) {
+      root.inventory = arrayFrom(result.inventory)
+      root.installed = arrayFrom(result.installed)
       root.inventoryRevision++
     }
-    if (Array.isArray(result.unavailable)) root.unavailable = result.unavailable
+    root.unavailable = arrayFrom(result.unavailable)
     if (result.preferences && typeof result.preferences === "object")
       root.preferences = result.preferences
     root.notice = ""
